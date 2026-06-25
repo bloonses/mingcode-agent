@@ -2,7 +2,7 @@
 ; For Inno Setup 6
 
 #define MyAppName "MINGCODE"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "MINGCODE Team"
 #define MyAppExeName "mingcode.exe"
 
@@ -36,7 +36,6 @@ Name: "addtopath"; Description: "Add to PATH (run mingcode from any terminal)"; 
 
 [Files]
 Source: "dist\mingcode.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "README.txt"; DestDir: "{app}"; Flags: ignoreversion;
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}";

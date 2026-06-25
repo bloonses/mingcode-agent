@@ -3,7 +3,7 @@ setlocal
 
 echo.
 echo ================================================================
-echo    MINGCODE v1.0.0 - Build Installer
+echo    MINGCODE v1.0.1 - Build Installer
 echo ================================================================
 echo.
 

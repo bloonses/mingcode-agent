@@ -31,9 +31,15 @@ def handle_slash_command(cmd, arg, agent, config) -> bool:
         console.print("[bold]Session Management:[/bold]")
         console.print("  /new            Start a new session (clear history)")
         console.print("  /save [name]    Save current session")
-        console.print("  /load <name>    Load a saved session")
+        console.print("  /load [name]    Load a saved session")
         console.print("  /sessions       List all saved sessions")
         console.print("  /delsession <n> Delete a saved session")
+        console.print()
+        console.print("[bold]Long-term Memory (Self-Evolving):[/bold]")
+        console.print("  /remember <text> Manually add a memory / user preference")
+        console.print("  /memory [type]  Show all saved memories (type: preference/project/success/lesson)")
+        console.print("  /forget <id>    Delete a specific memory by ID")
+        console.print("  /clearmemory    Clear all long-term memories")
         console.print()
         return True
     elif cmd == '/clear' or cmd == '/new' or cmd == '/newsession':
@@ -112,6 +118,87 @@ def handle_slash_command(cmd, arg, agent, config) -> bool:
             console.print(f"[{NEON_TEAL}]Session deleted: {name}[/{NEON_TEAL}]")
         else:
             console.print(f"[red]Session not found: {name}[/red]")
+        return True
+    elif cmd == '/remember':
+        if not arg:
+            console.print("[yellow]Usage: /remember <content to remember>[/yellow]")
+            console.print("Example: /remember I prefer using Rich library for terminal UI")
+            return True
+        content = arg.strip()
+        parts = content.split()
+        mem_type = "preference"
+        type_keywords = {
+            "preference": "preference",
+            "prefer": "preference",
+            "lesson": "lesson",
+            "mistake": "lesson",
+            "error": "lesson",
+            "project": "project",
+            "success": "success",
+            "works": "success",
+        }
+        lower_start = parts[0].lower().rstrip(':')
+        if lower_start in type_keywords:
+            mem_type = type_keywords[lower_start]
+            content = " ".join(parts[1:])
+        mem_id = agent.remember(content, memory_type=mem_type)
+        type_names = {
+            "preference": "user preference",
+            "project": "project knowledge",
+            "success": "successful experience",
+            "lesson": "lesson learned"
+        }
+        console.print(f"[{NEON_TEAL}]Saved as {type_names[mem_type]} (ID: {mem_id})[/{NEON_TEAL}]")
+        return True
+    elif cmd == '/memory':
+        mem_type = arg.strip().lower() if arg else None
+        valid_types = {"preference", "project", "success", "lesson"}
+        if mem_type and mem_type not in valid_types:
+            console.print(f"[yellow]Invalid type. Valid types: {', '.join(valid_types)}[/yellow]")
+            mem_type = None
+        memories = agent.long_term_memory.get_all(mem_type)
+        if not memories:
+            console.print("[yellow]No memories saved yet.[/yellow]")
+            console.print("[dim]I automatically learn from errors and successes. Use /remember to teach me.[/dim]")
+            return True
+        type_icons = {
+            "preference": "[blue]PREF[/blue]",
+            "project": "[yellow]PROJ[/yellow]",
+            "success": "[green]OK  [/green]",
+            "lesson": "[red]FAIL[/red]"
+        }
+        console.print()
+        table = Table(title=f"Long-term Memories ({len(memories)})", border_style=NEON_TEAL)
+        table.add_column("ID", style="dim", width=10)
+        table.add_column("Type", width=8)
+        table.add_column("Content")
+        table.add_column("Used", justify="right", width=6)
+        for mem in memories:
+            icon = type_icons.get(mem["type"], "📝")
+            content = mem["content"]
+            if len(content) > 80:
+                content = content[:77] + "..."
+            table.add_row(mem["id"], icon, content, str(mem.get("use_count", 0)))
+        console.print(table)
+        console.print()
+        return True
+    elif cmd == '/forget':
+        if not arg:
+            console.print("[yellow]Usage: /forget <memory-id>[/yellow]")
+            return True
+        mem_id = arg.strip()
+        if agent.long_term_memory.delete(mem_id):
+            console.print(f"[{NEON_TEAL}]Memory {mem_id} deleted[/{NEON_TEAL}]")
+        else:
+            console.print(f"[red]Memory not found: {mem_id}[/red]")
+        return True
+    elif cmd == '/clearmemory':
+        confirm = Confirm.ask("Are you sure you want to DELETE ALL long-term memories?", default=False)
+        if confirm:
+            removed = agent.long_term_memory.clear()
+            console.print(f"[{NEON_TEAL}]Cleared {removed} memories[/{NEON_TEAL}]")
+        else:
+            console.print("[yellow]Cancelled[/yellow]")
         return True
     elif cmd == '/model':
         if not arg:

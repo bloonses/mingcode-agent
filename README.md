@@ -1,4 +1,4 @@
-# MINGCODE <img src="https://img.shields.io/badge/version-1.0.0-neon?style=flat-square&color=%2300ff88" alt="version"> <img src="https://img.shields.io/badge/python-3.8+-blue?style=flat-square" alt="python">
+# MINGCODE <img src="https://img.shields.io/badge/version-1.0.1-neon?style=flat-square&color=%2300ff88" alt="version"> <img src="https://img.shields.io/badge/python-3.8+-blue?style=flat-square" alt="python">
 
 > ⚡ 赛博朋克风格的终端 AI 编码助手，支持多模型供应商、工具调用、会话持久化
 
