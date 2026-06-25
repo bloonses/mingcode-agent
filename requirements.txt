@@ -1,0 +1,5 @@
+requests
+rich
+pyyaml
+duckduckgo-search
+pygments
