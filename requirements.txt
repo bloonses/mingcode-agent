@@ -3,3 +3,6 @@ rich
 pyyaml
 duckduckgo-search
 pygments
+qrcode
+websocket-client
+cryptography

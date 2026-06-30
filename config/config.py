@@ -57,6 +57,20 @@ DEFAULT_CONFIG = {
     },
     "memory": {
         "max_history": 20
+    },
+    "wechat": {
+        "enabled": False,
+        "auto_start": False
+    },
+    "qq": {
+        "onebot": {
+            "enabled": False,
+            "auto_start": False
+        },
+        "official": {
+            "enabled": False,
+            "auto_start": False
+        }
     }
 }
 

@@ -1,10 +1,15 @@
 import sys
 import os
+import io
 from pathlib import Path
 from datetime import datetime
 
 from config.config import load_config, save_config, get_app_dir
 from core.agent import NeonAgent
+from core.subagent import SubAgent
+from core.wechat_bot import WeChatBot
+from core.qq_onebot import QQOneBot
+from core.qq_official import QQOfficialBot
 from ui.console import console, print_logo, print_user_message, print_assistant_message, print_error, get_prompt
 from ui.theme import NEON_TEAL
 from rich.text import Text
@@ -12,7 +17,80 @@ from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
 
-def handle_slash_command(cmd, arg, agent, config) -> bool:
+def _print_wechat_qr(data: str) -> None:
+    """WeChatBot.login 的回调：在终端显示二维码或状态"""
+    if data == "SCANED":
+        console.print(f"[{NEON_TEAL}]QR scanned! Confirm on your phone...[/{NEON_TEAL}]")
+        return
+    if not data:
+        console.print("[red]Failed to get QR code from server.[/red]")
+        return
+    _render_qr_ascii(data, "Scan with WeChat to login MINGCODE Bot:")
+
+
+def _print_qq_qr(url: str) -> None:
+    """QQOfficialBot.qr_login 的回调：终端显示 QQ 扫码配置二维码 URL"""
+    if not url:
+        console.print("[red]Failed to get QQ bind task.[/red]")
+        return
+    _render_qr_ascii(url, "Scan with QQ App to bind your official bot:")
+    console.print(f"[dim]URL: {url}[/dim]")
+
+
+def _render_qr_ascii(data: str, title: str) -> None:
+    """通用：在终端用 ASCII 显示二维码"""
+    try:
+        import qrcode
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(data)
+        qr.make(fit=True)
+        console.print()
+        console.print(f"[{NEON_TEAL} bold]{title}[/{NEON_TEAL} bold]")
+        console.print()
+        buf = io.StringIO()
+        qr.print_ascii(invert=True, out=buf)
+        console.print(buf.getvalue(), style="white")
+        console.print()
+    except ImportError:
+        console.print(f"[yellow]Install 'qrcode' to display QR. Data: {data}[/yellow]")
+
+
+def _make_wechat_handler(agent):
+    """构造微信消息处理回调：把消息转发给 NeonAgent，返回完整回复文本"""
+    def handler(text: str, from_user: str) -> str:
+        try:
+            chunks = []
+            for chunk in agent.chat(text):
+                if chunk:
+                    chunks.append(chunk)
+            return "".join(chunks)
+        except Exception as e:
+            return f"[处理失败: {e}]"
+    return handler
+
+
+def _make_qq_handler(agent):
+    """QQ 消息处理回调（OneBot & Official 通用）：
+    OneBot: handler(text, user_id, group_id_or_None)
+    Official: handler(text, user_id, target_id, scope)"""
+    def onebot_handler(text: str, user_id: str, group_id) -> str:
+        try:
+            chunks = [c for c in agent.chat(text) if c]
+            return "".join(chunks)
+        except Exception as e:
+            return f"[处理失败: {e}]"
+
+    def official_handler(text: str, user_id: str, target_id: str, scope: str) -> str:
+        try:
+            chunks = [c for c in agent.chat(text) if c]
+            return "".join(chunks)
+        except Exception as e:
+            return f"[处理失败: {e}]"
+    return onebot_handler, official_handler
+
+
+def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
+                         qq_onebot: QQOneBot, qq_official: QQOfficialBot) -> bool:
     if cmd in ['/help', '/?']:
         console.print()
         console.print(f"[{NEON_TEAL} bold]MINGCODE Help[/{NEON_TEAL} bold]")
@@ -40,6 +118,23 @@ def handle_slash_command(cmd, arg, agent, config) -> bool:
         console.print("  /memory [type]  Show all saved memories (type: preference/project/success/lesson)")
         console.print("  /forget <id>    Delete a specific memory by ID")
         console.print("  /clearmemory    Clear all long-term memories")
+        console.print()
+        console.print("[bold]Subagent:[/bold]")
+        console.print("  /sub <task>     Run a one-off subagent for a task")
+        console.print()
+        console.print("[bold]WeChat ClawBot:[/bold]")
+        console.print("  /wechat login   Scan QR code to login WeChat bot")
+        console.print("  /wechat start   Start listening & auto-reply via MINGCODE")
+        console.print("  /wechat stop    Stop listening")
+        console.print("  /wechat status  Show WeChat bot status")
+        console.print("  /wechat logout  Logout & clear credentials")
+        console.print()
+        console.print("[bold]QQ Bots:[/bold]")
+        console.print("  /qq onebot <connect|stop|status|logout|config>")
+        console.print("                  OneBot 11 (NapCat/Lagrange) client")
+        console.print("  /qq official <login|connect|stop|status|logout|config>")
+        console.print("                  login: QR-scan to auto-configure (QQ App)")
+        console.print("                  config: manually enter appid + secret")
         console.print()
         return True
     elif cmd == '/clear' or cmd == '/new' or cmd == '/newsession':
@@ -235,7 +330,86 @@ def handle_slash_command(cmd, arg, agent, config) -> bool:
             console.print(f"  • {tool}")
         console.print()
         return True
+    elif cmd == '/sub':
+        if not arg.strip():
+            console.print("[yellow]Usage: /sub <task description>[/yellow]")
+            return True
+        task = arg.strip()
+        console.print(f"[{NEON_TEAL}]Starting subagent...[/{NEON_TEAL}]")
+        sub = SubAgent(llm=agent.llm, long_term_memory=agent.long_term_memory, depth=2)
+        result = sub.run(task)
+        console.print()
+        print_assistant_message(f"[子智能体] {result}")
+        console.print()
+        return True
+    elif cmd == '/wechat':
+        sub_parts = arg.split(maxsplit=1) if arg else []
+        sub = sub_parts[0].lower() if sub_parts else ''
+        if sub == 'login':
+            if wechat_bot.is_logged_in:
+                console.print("[yellow]Already logged in. Use /wechat logout first.[/yellow]")
+                return True
+            console.print(f"[{NEON_TEAL}]Starting WeChat login...[/{NEON_TEAL}]")
+            if wechat_bot.login(print_qr=_print_wechat_qr):
+                console.print(f"[{NEON_TEAL}]WeChat login successful![/{NEON_TEAL}]")
+                console.print(f"  Bot ID:  {wechat_bot.bot_id}")
+                console.print(f"  User ID: {wechat_bot.user_id}")
+            else:
+                console.print("[red]WeChat login failed or QR expired.[/red]")
+            return True
+        elif sub == 'start':
+            if not wechat_bot.is_logged_in:
+                console.print("[red]Not logged in. Use /wechat login first.[/red]")
+                return True
+            if wechat_bot.is_listening:
+                console.print("[yellow]Already listening.[/yellow]")
+                return True
+            if wechat_bot.start_listening(_make_wechat_handler(agent)):
+                console.print(f"[{NEON_TEAL}]WeChat bot started. MINGCODE will auto-reply to messages.[/{NEON_TEAL}]")
+            else:
+                console.print("[red]Failed to start WeChat bot.[/red]")
+            return True
+        elif sub == 'stop':
+            wechat_bot.stop_listening()
+            console.print(f"[{NEON_TEAL}]WeChat bot stopped.[/{NEON_TEAL}]")
+            return True
+        elif sub == 'status':
+            console.print()
+            console.print(f"[{NEON_TEAL} bold]WeChat Bot Status[/{NEON_TEAL} bold]")
+            console.print(f"  Logged in:  {'Yes' if wechat_bot.is_logged_in else 'No'}")
+            if wechat_bot.is_logged_in:
+                console.print(f"  Bot ID:     {wechat_bot.bot_id}")
+                console.print(f"  User ID:    {wechat_bot.user_id}")
+                console.print(f"  Listening:  {'Yes' if wechat_bot.is_listening else 'No'}")
+                console.print(f"  Contacts:   {len(wechat_bot.context_tokens)} user(s)")
+            console.print()
+            return True
+        elif sub == 'logout':
+            wechat_bot.logout()
+            console.print(f"[{NEON_TEAL}]WeChat logged out.[/{NEON_TEAL}]")
+            return True
+        else:
+            console.print("[yellow]Usage: /wechat <login|start|stop|status|logout>[/yellow]")
+            return True
+    elif cmd == '/qq':
+        parts = arg.split(maxsplit=1) if arg else []
+        backend = parts[0].lower() if parts else ''
+        sub_arg = parts[1] if len(parts) > 1 else ''
+        onebot_h, official_h = _make_qq_handler(agent)
+        if backend == 'onebot':
+            return _handle_qq_onebot(sub_arg, qq_onebot, onebot_h)
+        elif backend == 'official':
+            return _handle_qq_official(sub_arg, qq_official, official_h)
+        else:
+            console.print("[yellow]Usage: /qq <onebot|official> <connect|stop|status|logout|config>[/yellow]")
+            return True
     elif cmd in ['/exit', '/quit']:
+        if wechat_bot.is_listening:
+            wechat_bot.stop_listening()
+        if qq_onebot.is_listening:
+            qq_onebot.stop_listening()
+        if qq_official.is_listening:
+            qq_official.stop_listening()
         if agent.memory.messages and not agent.memory.current_session_name:
             save = Confirm.ask("Save current session before exiting?", default=False)
             if save:
@@ -245,6 +419,110 @@ def handle_slash_command(cmd, arg, agent, config) -> bool:
         return False
     else:
         console.print("[yellow]Unknown command. Type /help for available commands.[/yellow]")
+        return True
+
+
+def _handle_qq_onebot(sub: str, bot: QQOneBot, handler) -> bool:
+    sub = sub.strip().lower()
+    if sub == 'config':
+        ws_url = Prompt.ask("  OneBot WebSocket URL (e.g. ws://127.0.0.1:3001)")
+        token = Prompt.ask("  Access Token (Enter for none)", default="", password=True)
+        http_base = Prompt.ask("  HTTP API base (Enter to derive from WS URL)", default="")
+        bot.configure(ws_url, token, http_base)
+        console.print(f"[{NEON_TEAL}]OneBot config saved.[/{NEON_TEAL}]")
+        return True
+    elif sub == 'connect' or sub == 'start':
+        if not bot.is_configured:
+            console.print("[red]Not configured. Run /qq onebot config first.[/red]")
+            return True
+        if bot.is_listening:
+            console.print("[yellow]Already listening.[/yellow]")
+            return True
+        if bot.start_listening(handler):
+            console.print(f"[{NEON_TEAL}]OneBot client started. WS: {bot.ws_url}[/{NEON_TEAL}]")
+            console.print("[dim]Connecting in background...[/dim]")
+        else:
+            console.print("[red]Failed to start. Check ws_url.[/red]")
+        return True
+    elif sub == 'stop':
+        bot.stop_listening()
+        console.print(f"[{NEON_TEAL}]OneBot stopped.[/{NEON_TEAL}]")
+        return True
+    elif sub == 'status':
+        console.print()
+        console.print(f"[{NEON_TEAL} bold]QQ OneBot Status[/{NEON_TEAL} bold]")
+        console.print(f"  Configured: {'Yes' if bot.is_configured else 'No'}")
+        if bot.is_configured:
+            console.print(f"  WS URL:     {bot.ws_url}")
+            console.print(f"  Self ID:    {bot.self_id or '(pending)'}")
+            console.print(f"  Connected:  {'Yes' if bot.is_connected else 'No'}")
+            console.print(f"  Listening:  {'Yes' if bot.is_listening else 'No'}")
+        console.print()
+        return True
+    elif sub == 'logout':
+        bot.logout()
+        console.print(f"[{NEON_TEAL}]OneBot config cleared.[/{NEON_TEAL}]")
+        return True
+    else:
+        console.print("[yellow]Usage: /qq onebot <config|connect|stop|status|logout>[/yellow]")
+        return True
+
+
+def _handle_qq_official(sub: str, bot: QQOfficialBot, handler) -> bool:
+    sub = sub.strip().lower()
+    if sub == 'login':
+        if bot.is_configured:
+            console.print("[yellow]Already configured. Use /qq official logout first.[/yellow]")
+            return True
+        console.print(f"[{NEON_TEAL}]Starting QQ official bot QR setup...[/{NEON_TEAL}]")
+        console.print("[dim]Requires an official bot created at https://q.qq.com[/dim]")
+        if bot.qr_login(print_qr=_print_qq_qr):
+            console.print(f"[{NEON_TEAL}]QQ official bot bound![/{NEON_TEAL}]")
+            console.print(f"  App ID: {bot.appid}")
+        else:
+            console.print("[red]QR setup failed or expired.[/red]")
+        return True
+    elif sub == 'config':
+        appid = Prompt.ask("  App ID")
+        secret = Prompt.ask("  App Secret", password=True)
+        token = Prompt.ask("  Bot Token (Enter for none)", default="", password=True)
+        bot.configure(appid, secret, token)
+        console.print(f"[{NEON_TEAL}]Official Bot config saved.[/{NEON_TEAL}]")
+        return True
+    elif sub == 'connect' or sub == 'start':
+        if not bot.is_configured:
+            console.print("[red]Not configured. Run /qq official config first.[/red]")
+            return True
+        if bot.is_listening:
+            console.print("[yellow]Already listening.[/yellow]")
+            return True
+        if bot.start_listening(handler):
+            console.print(f"[{NEON_TEAL}]Official Bot started (appid={bot.appid}).[/{NEON_TEAL}]")
+            console.print("[dim]Connecting in background...[/dim]")
+        else:
+            console.print("[red]Failed to start. Check appid/secret.[/red]")
+        return True
+    elif sub == 'stop':
+        bot.stop_listening()
+        console.print(f"[{NEON_TEAL}]Official Bot stopped.[/{NEON_TEAL}]")
+        return True
+    elif sub == 'status':
+        console.print()
+        console.print(f"[{NEON_TEAL} bold]QQ Official Bot Status[/{NEON_TEAL} bold]")
+        console.print(f"  Configured: {'Yes' if bot.is_configured else 'No'}")
+        if bot.is_configured:
+            console.print(f"  App ID:     {bot.appid}")
+            console.print(f"  Intents:    {bot.intents}")
+            console.print(f"  Connected:  {'Yes' if bot.is_connected else 'No'}")
+            console.print(f"  Listening:  {'Yes' if bot.is_listening else 'No'}")
+        console.print()
+        return True
+    elif sub == 'logout':
+        bot.logout()
+        console.print(f"[{NEON_TEAL}]Official Bot config cleared.[/{NEON_TEAL}]")
+        return True
+    else:
+        console.print("[yellow]Usage: /qq official <login|config|connect|stop|status|logout>[/yellow]")
         return True
 
 
@@ -337,32 +615,52 @@ def run_settings_wizard(agent, config):
 
 def main():
     config = load_config()
-    
+
     if os.name == 'nt':
         os.system('cls')
     else:
         os.system('clear')
-    
+
     print_logo()
-    
+
     agent = NeonAgent(config)
-    
+    wechat_bot = WeChatBot()
+    qq_onebot = QQOneBot()
+    qq_official = QQOfficialBot()
+    onebot_h, official_h = _make_qq_handler(agent)
+
+    wechat_cfg = config.get('wechat', {})
+    if wechat_cfg.get('enabled') and wechat_cfg.get('auto_start') and wechat_bot.is_logged_in:
+        if wechat_bot.start_listening(_make_wechat_handler(agent)):
+            console.print(f"[{NEON_TEAL}]WeChat bot auto-started.[/{NEON_TEAL}]")
+
+    qq_cfg = config.get('qq', {})
+    ob_cfg = qq_cfg.get('onebot', {})
+    if ob_cfg.get('enabled') and ob_cfg.get('auto_start') and qq_onebot.is_configured:
+        if qq_onebot.start_listening(onebot_h):
+            console.print(f"[{NEON_TEAL}]QQ OneBot auto-started.[/{NEON_TEAL}]")
+    of_cfg = qq_cfg.get('official', {})
+    if of_cfg.get('enabled') and of_cfg.get('auto_start') and qq_official.is_configured:
+        if qq_official.start_listening(official_h):
+            console.print(f"[{NEON_TEAL}]QQ Official Bot auto-started.[/{NEON_TEAL}]")
+
     console.print(f"[{NEON_TEAL}]Type /help for commands, or just ask anything.[/{NEON_TEAL}]\n")
-    
+
     while True:
         try:
             user_input = console.input(get_prompt())
             if not user_input.strip():
                 continue
-            
+
             if user_input.startswith('/'):
                 parts = user_input.split(maxsplit=1)
                 cmd = parts[0].lower()
                 arg = parts[1] if len(parts) > 1 else ''
-                if not handle_slash_command(cmd, arg, agent, config):
+                if not handle_slash_command(cmd, arg, agent, config, wechat_bot,
+                                            qq_onebot, qq_official):
                     break
                 continue
-            
+
             print_user_message(user_input)
             full_response = ""
             try:
@@ -374,12 +672,18 @@ def main():
             except KeyboardInterrupt:
                 console.print("\n[yellow]Interrupted[/yellow]")
                 continue
-            
+
         except KeyboardInterrupt:
             console.print("\n[yellow]Press Ctrl+D or type /exit to quit[/yellow]")
             continue
         except EOFError:
             console.print(f"\n[{NEON_TEAL}]Goodbye![/{NEON_TEAL}]")
+            if wechat_bot.is_listening:
+                wechat_bot.stop_listening()
+            if qq_onebot.is_listening:
+                qq_onebot.stop_listening()
+            if qq_official.is_listening:
+                qq_official.stop_listening()
             break
         except Exception as e:
             print_error(f"Error: {str(e)}")
