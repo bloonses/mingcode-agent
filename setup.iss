@@ -2,7 +2,7 @@
 ; For Inno Setup 6
 
 #define MyAppName "MINGCODE"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "MINGCODE Team"
 #define MyAppExeName "mingcode.exe"
 
