@@ -105,6 +105,8 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print("  /config         Show current configuration")
         console.print("  /settings       Configure LLM provider (interactive)")
         console.print("  /tools          List available tools")
+        console.print("  /debug          Show diagnostic info + test API call")
+        console.print("  /doctor         Full health check (config/deps/network/LLM)")
         console.print()
         console.print("[bold]Session Management:[/bold]")
         console.print("  /new            Start a new session (clear history)")
@@ -340,6 +342,146 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         result = sub.run(task)
         console.print()
         print_assistant_message(f"[子智能体] {result}")
+        console.print()
+        return True
+    elif cmd == '/debug':
+        console.print()
+        console.print(f"[{NEON_TEAL} bold]═══ MINGCODE Diagnostic ═══[/{NEON_TEAL} bold]")
+        console.print()
+        console.print("[bold]Environment[/bold]")
+        console.print(f"  Version:       1.0.4")
+        console.print(f"  Python:       {sys.version.split()[0]}")
+        console.print(f"  Platform:     {sys.platform}")
+        console.print(f"  Frozen:       {getattr(sys, 'frozen', False)}")
+        console.print(f"  App Dir:      {get_app_dir()}")
+        from config.config import get_user_data_dir
+        console.print(f"  Data Dir:     {get_user_data_dir()}")
+        console.print(f"  Config File:  {get_user_data_dir() / 'config.yaml'}")
+        console.print()
+        console.print("[bold]LLM Config[/bold]")
+        llm = config.get('llm', {})
+        api_key = str(llm.get('api_key', ''))
+        console.print(f"  Base URL:     {llm.get('base_url', 'N/A')}")
+        console.print(f"  Model:        {llm.get('model', 'N/A')}")
+        console.print(f"  API Key:      {'*' * 8}{api_key[-4:] if len(api_key) > 4 else '****'}")
+        console.print(f"  Temperature:  {llm.get('temperature', 0.7)}")
+        console.print(f"  Max Tokens:   {llm.get('max_tokens', 4096)}")
+        console.print()
+        console.print("[bold]Session[/bold]")
+        console.print(f"  Messages:     {len(agent.memory.messages)}")
+        console.print(f"  Session:      {agent.memory.current_session_name or '(unsaved)'}")
+        console.print(f"  Tools:        {', '.join(agent.registry.list_tools())}")
+        console.print()
+        console.print(f"[{NEON_TEAL}]Sending test request (hi)...[/{NEON_TEAL}]")
+        try:
+            resp = agent.llm.chat([{"role": "user", "content": "hi"}], stream=False)
+            content = resp.get('content', '') or ''
+            console.print(f"  [green]OK[/green] - Response: {content[:60]}{'...' if len(content) > 60 else ''}")
+        except Exception as e:
+            console.print(f"  [red]FAILED[/red]: {e}")
+            if hasattr(e, 'status_code') and e.status_code:
+                console.print(f"  [red]Status[/red]: {e.status_code}")
+            if hasattr(e, 'message') and e.message:
+                console.print(f"  [red]Message[/red]: {e.message}")
+        console.print()
+        return True
+    elif cmd == '/doctor':
+        console.print()
+        console.print(f"[{NEON_TEAL} bold]═══ MINGCODE Doctor ═══[/{NEON_TEAL} bold]")
+        console.print()
+        issues = []
+        # 1. Config file
+        from config.config import get_user_data_dir, get_config_path
+        cfg_path = get_config_path()
+        if cfg_path.exists():
+            console.print(f"  [green]✓[/green] Config file exists: {cfg_path}")
+        else:
+            console.print(f"  [yellow]![/yellow] Config file missing (will auto-create on first run)")
+        # 2. LLM config
+        llm = config.get('llm', {})
+        if not llm.get('base_url'):
+            issues.append("LLM base_url is empty")
+            console.print("  [red]✗[/red] LLM base_url is empty")
+        else:
+            console.print(f"  [green]✓[/green] LLM base_url set: {llm['base_url']}")
+        if not llm.get('api_key') and 'localhost' not in llm.get('base_url', '') and '127.0.0.1' not in llm.get('base_url', ''):
+            issues.append("API key is empty but base_url is not localhost")
+            console.print("  [red]✗[/red] API key is empty (required for cloud providers)")
+        else:
+            console.print("  [green]✓[/green] API key configured")
+        if not llm.get('model'):
+            issues.append("Model name is empty")
+            console.print("  [red]✗[/red] Model name is empty")
+        else:
+            console.print(f"  [green]✓[/green] Model set: {llm['model']}")
+        # 3. Dependencies
+        console.print()
+        console.print("[bold]Dependencies[/bold]")
+        for mod_name in ['requests', 'rich', 'yaml', 'duckduckgo_search', 'pygments', 'qrcode', 'websocket', 'cryptography']:
+            try:
+                __import__(mod_name)
+                console.print(f"  [green]✓[/green] {mod_name}")
+            except ImportError:
+                issues.append(f"Missing dependency: {mod_name}")
+                console.print(f"  [red]✗[/red] {mod_name} (missing)")
+        # 4. Network connectivity to LLM
+        console.print()
+        console.print("[bold]Network Test[/bold]")
+        try:
+            import requests as _req
+            base = llm.get('base_url', '')
+            if base:
+                r = _req.get(base.replace('/v1', '') + '/models', timeout=10, headers={"Authorization": f"Bearer {llm.get('api_key', '')}"})
+                if r.status_code < 500:
+                    console.print(f"  [green]✓[/green] Reached {base} (status {r.status_code})")
+                else:
+                    console.print(f"  [yellow]![/yellow] Server returned {r.status_code} from {base}")
+            else:
+                console.print("  [red]✗[/red] No base_url to test")
+                issues.append("No base_url configured")
+        except Exception as e:
+            issues.append(f"Network error: {str(e)[:80]}")
+            console.print(f"  [red]✗[/red] Cannot reach {llm.get('base_url', '?')}: {str(e)[:80]}")
+        # 5. Data dir writable
+        from config.config import get_user_data_dir
+        data_dir = get_user_data_dir()
+        try:
+            test_file = data_dir / ".doctor_test"
+            test_file.write_text("ok", encoding='utf-8')
+            test_file.unlink()
+            console.print(f"  [green]✓[/green] Data dir writable: {data_dir}")
+        except Exception as e:
+            issues.append(f"Data dir not writable: {e}")
+            console.print(f"  [red]✗[/red] Data dir not writable: {data_dir}")
+        # 6. Test actual LLM call
+        console.print()
+        console.print("[bold]LLM Test Call[/bold]")
+        try:
+            resp = agent.llm.chat([{"role": "user", "content": "say ok"}], stream=False)
+            console.print(f"  [green]✓[/green] LLM responded: {(resp.get('content') or '')[:40]}")
+        except Exception as e:
+            issues.append(f"LLM call failed: {e}")
+            console.print(f"  [red]✗[/red] LLM call failed: {e}")
+            if hasattr(e, 'status_code') and e.status_code == 400:
+                console.print(f"  [dim]400 usually means model name wrong, or messages format issue[/dim]")
+                console.print(f"  [dim]Response: {getattr(e, 'message', '')[:200]}[/dim]")
+            elif hasattr(e, 'status_code') and e.status_code == 401:
+                console.print(f"  [dim]401 = invalid API key, run /settings to fix[/dim]")
+            elif hasattr(e, 'status_code') and e.status_code == 404:
+                console.print(f"  [dim]404 = model not found, check /model name[/dim]")
+        # Summary
+        console.print()
+        if not issues:
+            console.print(f"[{NEON_TEAL} bold]All checks passed ✓[/{NEON_TEAL} bold]")
+        else:
+            console.print(f"[red bold]Found {len(issues)} issue(s):[/red bold]")
+            for i, iss in enumerate(issues, 1):
+                console.print(f"  [red]{i}.[/red] {iss}")
+            console.print()
+            console.print("[dim]Fix hints:[/dim]")
+            console.print("[dim]  • /settings 重新配置 LLM[/dim]")
+            console.print("[dim]  • /model <name> 切换模型名[/dim]")
+            console.print("[dim]  • pip install -r requirements.txt 补依赖[/dim]")
         console.print()
         return True
     elif cmd == '/wechat':
