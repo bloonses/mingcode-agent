@@ -61,7 +61,7 @@ def print_logo() -> None:
     big_logo = Text(MINGCODE_BIG, style=f"bold {NEON_TEAL}")
     console.print(big_logo)
     console.print()
-    version = Text("v1.0.9", style=style_text_muted)
+    version = Text("v1.1.0", style=style_text_muted)
     console.print(version, justify="center")
     console.print()
     console.print(Text("Welcome to MINGCODE - Your AI coding assistant.", style=style_text))
