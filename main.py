@@ -89,6 +89,76 @@ def _make_qq_handler(agent):
     return onebot_handler, official_handler
 
 
+def handle_todo_command(arg: str, agent) -> bool:
+    """处理 /todo 命令族，与 AI 共享同一 TodoList 实例。
+
+    子命令：list / add / start / done / pending / delete / clear
+    """
+    todo = agent.todo_list
+    parts = arg.split(maxsplit=1) if arg else []
+    sub = parts[0].lower() if parts else "list"
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in ("list", "ls", ""):
+        items = todo.list()
+        if not items:
+            console.print(f"[{NEON_TEAL}]No todos.[/{NEON_TEAL}]")
+            return True
+        console.print()
+        table = Table(title=f"Todos ({len(items)})", border_style=NEON_TEAL)
+        table.add_column("ID", style=NEON_TEAL, width=8)
+        table.add_column("Status", width=12)
+        table.add_column("Content")
+        status_icon = {"pending": "[ ] pending", "in_progress": "[~] in_progress", "completed": "[x] completed"}
+        for it in items:
+            table.add_row(it["id"], status_icon.get(it["status"], it["status"]), it["content"])
+        console.print(table)
+        console.print()
+        return True
+
+    if sub == "add":
+        if not rest:
+            console.print("[yellow]Usage: /todo add <content>[/yellow]")
+            return True
+        new_id = todo.add(rest)
+        todo.save()
+        console.print(f"[{NEON_TEAL}]Added todo {new_id}: {rest}[/{NEON_TEAL}]")
+        return True
+
+    if sub in ("start", "done", "pending"):
+        if not rest:
+            console.print(f"[yellow]Usage: /todo {sub} <id>[/yellow]")
+            return True
+        status_map = {"start": "in_progress", "done": "completed", "pending": "pending"}
+        target_status = status_map[sub]
+        if todo.update_status(rest, target_status):
+            todo.save()
+            console.print(f"[{NEON_TEAL}]Todo {rest} -> {target_status}[/{NEON_TEAL}]")
+        else:
+            console.print(f"[red]Failed: todo '{rest}' not found or status invalid[/red]")
+        return True
+
+    if sub == "delete":
+        if not rest:
+            console.print("[yellow]Usage: /todo delete <id>[/yellow]")
+            return True
+        if todo.delete(rest):
+            todo.save()
+            console.print(f"[{NEON_TEAL}]Deleted todo {rest}[/{NEON_TEAL}]")
+        else:
+            console.print(f"[red]Todo not found: {rest}[/red]")
+        return True
+
+    if sub == "clear":
+        removed = todo.clear_completed()
+        todo.save()
+        console.print(f"[{NEON_TEAL}]Cleared {removed} completed todo(s)[/{NEON_TEAL}]")
+        return True
+
+    console.print(f"[yellow]Unknown subcommand: {sub}. Try: list / add / start / done / pending / delete / clear[/yellow]")
+    return True
+
+
 def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
                          qq_onebot: QQOneBot, qq_official: QQOfficialBot) -> bool:
     if cmd in ['/help', '/?']:
@@ -123,6 +193,15 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print()
         console.print("[bold]Subagent:[/bold]")
         console.print("  /sub <task>     Run a one-off subagent for a task")
+        console.print()
+        console.print("[bold]Todo List:[/bold]")
+        console.print("  /todo           List all todos (pending + in_progress + completed)")
+        console.print("  /todo add <text>        Add a new todo")
+        console.print("  /todo start <id>         Mark todo as in_progress")
+        console.print("  /todo done <id>          Mark todo as completed")
+        console.print("  /todo pending <id>       Reset todo to pending")
+        console.print("  /todo delete <id>        Delete a todo")
+        console.print("  /todo clear              Remove all completed todos")
         console.print()
         console.print("[bold]WeChat ClawBot:[/bold]")
         console.print("  /wechat login   Scan QR code to login WeChat bot")
@@ -297,6 +376,8 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         else:
             console.print("[yellow]Cancelled[/yellow]")
         return True
+    elif cmd == '/todo':
+        return handle_todo_command(arg, agent)
     elif cmd == '/model':
         if not arg:
             console.print(f"[{NEON_TEAL}]Current model: {agent.llm.model}[/{NEON_TEAL}]")
@@ -349,7 +430,7 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print(f"[{NEON_TEAL} bold]═══ MINGCODE Diagnostic ═══[/{NEON_TEAL} bold]")
         console.print()
         console.print("[bold]Environment[/bold]")
-        console.print(f"  Version:       1.0.4")
+        console.print(f"  Version:       1.0.8")
         console.print(f"  Python:       {sys.version.split()[0]}")
         console.print(f"  Platform:     {sys.platform}")
         console.print(f"  Frozen:       {getattr(sys, 'frozen', False)}")
@@ -455,13 +536,25 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
             console.print(f"  [red]✗[/red] Data dir not writable: {data_dir}")
         # 6. Test actual LLM call
         console.print()
-        console.print("[bold]LLM Test Call[/bold]")
-        try:
-            resp = agent.llm.chat([{"role": "user", "content": "say ok"}], stream=False)
-            console.print(f"  [green]✓[/green] LLM responded: {(resp.get('content') or '')[:40]}")
-        except Exception as e:
-            issues.append(f"LLM call failed: {e}")
-            console.print(f"  [red]✗[/red] LLM call failed: {e}")
+        console.print("[bold]LLM Test Call (3 retries)[/bold]")
+        last_error = None
+        success = False
+        for attempt in range(1, 4):
+            try:
+                resp = agent.llm.chat([{"role": "user", "content": "say ok"}], stream=False)
+                console.print(f"  [green]✓[/green] Attempt {attempt}/3: LLM responded: {(resp.get('content') or '')[:40]}")
+                success = True
+                break
+            except Exception as e:
+                last_error = e
+                console.print(f"  [yellow]![/yellow] Attempt {attempt}/3 failed: {e}")
+                if attempt < 3:
+                    import time as _time
+                    _time.sleep(2)
+        if not success:
+            issues.append(f"LLM call failed after 3 retries: {last_error}")
+            console.print(f"  [red]✗[/red] All 3 attempts failed")
+            e = last_error
             if hasattr(e, 'status_code') and e.status_code == 400:
                 console.print(f"  [dim]400 usually means model name wrong, or messages format issue[/dim]")
                 console.print(f"  [dim]Response: {getattr(e, 'message', '')[:200]}[/dim]")
@@ -469,6 +562,8 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
                 console.print(f"  [dim]401 = invalid API key, run /settings to fix[/dim]")
             elif hasattr(e, 'status_code') and e.status_code == 404:
                 console.print(f"  [dim]404 = model not found, check /model name[/dim]")
+            elif hasattr(e, 'status_code') and e.status_code == 429:
+                console.print(f"  [dim]429 = rate limit exceeded, wait and retry[/dim]")
         # Summary
         console.print()
         if not issues:

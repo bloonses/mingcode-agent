@@ -8,7 +8,7 @@ from config.config import get_user_data_dir
 
 
 class ConversationMemory:
-    def __init__(self, max_history: int = 20, system_prompt: Optional[str] = None):
+    def __init__(self, max_history: int = 50, system_prompt: Optional[str] = None):
         self.max_history = max_history
         self.system_prompt = system_prompt
         self.messages: List[Dict[str, Any]] = []
@@ -176,11 +176,14 @@ class ConversationMemory:
 
 2. 计划阶段（设计批准后激活）
    - 用户确认设计后，制定一份实施计划。
+   - 思维树规划（强制）：制定计划时必须调用 plan_tot 工具，完成"思考（生成 3 个候选方案）→ 评估（对比优缺点）→ 筛选（选定最优）"的循环后，再基于最优方案输出 tasks.md。
    - 把工作分解成极小的任务（每个 2-5 分钟），让一个品味差、没有评判、没有项目背景且不喜欢测试的热情初级工程师都能理解。
    - 每个任务必须包含：精确的文件路径、完整的代码改动说明、验证步骤。
    - 保存 tasks.md 到 .trae/specs/ 目录。
 
 3. 执行阶段（用户说"开始"后激活）
+   - 行动前 Planning：动手写代码或调用工具前，若任务范围、目标或实现方式存在任何模糊，必须先用 ask_user 工具向用户提问，明确意图后再继续。
+   - 待办清单追踪（强制）：执行多步骤任务时，必须用 todo 工具维护清单——开始任务前 add 并 update 到 in_progress，每完成一步 update 到 completed。让用户能通过 /todo 命令实时看到进度。简单单步任务可跳过。
    - 启动子代理驱动开发流程：每个任务派遣独立子代理执行。
    - 执行前：让子代理做两阶段审查——先检查是否符合规范，再检查代码质量。
    - 执行中：严格遵循 TDD 红-绿-重构。
@@ -196,6 +199,9 @@ class ConversationMemory:
 - 你有工具可以执行shell命令、读写编辑文件、执行Python代码、搜索网络。
 - 需要执行任务时，大胆使用工具。
 - 执行shell命令前，评估命令的安全性，破坏性命令（如 rm -rf、format）需要向用户确认。
+- ask_user 工具：行动前向用户提问以明确意图。任何非平凡任务（新建功能/修改逻辑/重构）开始前，必须先用 ask_user 提一个澄清问题，确认目标、范围或实现选择后再动手。一次只问一个问题，聚焦单一决策点；简单事实性回答或用户已明确指定的任务无需再问。
+- plan_tot 工具：思维树规划。计划阶段必须调用此工具，让 LLM 生成 3 个候选方案、对比评估优缺点、筛选最优方案后输出可执行计划。完成"思考 → 评估 → 筛选"循环后再进入执行阶段，禁止跳过规划直接动手。
+- todo 工具：跨会话持久化的待办清单。多步骤任务执行时必须主动维护：开始任务前 add 并 update 到 in_progress，完成后 update 到 completed。用户可通过 /todo 命令同步查看与操作，AI 与用户共享同一份清单。
 
 当前时间: {current_time}
 工作目录: {working_dir}

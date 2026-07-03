@@ -17,7 +17,7 @@ from tools.search import WebSearchTool, WebFetchTool
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 10
+MAX_ITERATIONS = 25
 DEFAULT_TIMEOUT = 180
 
 SUBAGENT_PROMPT_SUFFIX = """
@@ -49,7 +49,7 @@ class SubAgent:
         self.long_term_memory = long_term_memory
         self.depth = depth
         self.timeout = timeout
-        self.memory = ConversationMemory(max_history=20)
+        self.memory = ConversationMemory(max_history=30)
         self.registry = ToolRegistry()
         self._register_tools()
         self.memory.build_system_prompt(self.registry.get_all_schemas())

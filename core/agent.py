@@ -11,6 +11,10 @@ from tools.files import FileReadTool, FileWriteTool, FileEditTool
 from tools.code import PythonExecTool
 from tools.search import WebSearchTool, WebFetchTool
 from tools.subagent import SubAgentTool
+from tools.ask_user import AskUserTool
+from tools.plan_tot import PlanToTTool
+from tools.todo import TodoTool
+from core.todo import TodoList
 from ui.console import (
     print_thinking_spinner,
     print_tool_call,
@@ -29,6 +33,8 @@ class NeonAgent:
             max_history=config['memory']['max_history']
         )
         self.long_term_memory = LongTermMemory()
+        self.todo_list = TodoList()
+        self.todo_list.load()
         self.registry = ToolRegistry()
         self._register_tools()
         self.memory.build_system_prompt(self.registry.get_all_schemas())
@@ -44,6 +50,12 @@ class NeonAgent:
         self.registry.register(WebFetchTool())
         # 主 agent 的 subagent 工具，depth=2（可再递归 2 层）
         self.registry.register(SubAgentTool(self.llm, self.long_term_memory, depth=2))
+        # 行动前向用户提问以明确意图
+        self.registry.register(AskUserTool())
+        # 思维树规划：思考 → 评估 → 筛选循环后再行动
+        self.registry.register(PlanToTTool(self.llm))
+        # 待办清单：跨会话持久化，AI 与 /todo 命令共享同一实例
+        self.registry.register(TodoTool(self.todo_list))
 
     def _build_system_prompt_with_memory(self, user_input: str) -> str:
         base_prompt = self.memory.system_prompt or ""
@@ -56,7 +68,7 @@ class NeonAgent:
         original_system_prompt = self.memory.system_prompt
         self.memory.system_prompt = self._build_system_prompt_with_memory(user_input)
         
-        max_iterations = 10
+        max_iterations = 25
         last_error: Optional[str] = None
         last_error_tool: Optional[str] = None
 

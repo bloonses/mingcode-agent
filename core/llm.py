@@ -36,6 +36,44 @@ class LLMClient:
             "Authorization": f"Bearer {self.api_key}"
         }
 
+    def _extract_error_message(self, response: requests.Response) -> str:
+        """健壮解析各种供应商的 4xx/5xx 错误响应体，返回可读字符串"""
+        raw_text = response.text or ""
+        try:
+            data = response.json()
+        except Exception:
+            return raw_text[:500] or f"(empty body, status {response.status_code})"
+        # 常见格式按优先级尝试
+        if not isinstance(data, dict):
+            return str(data)[:500]
+        # 1. OpenAI 标准: {"error": {"message": "...", "type": "...", "code": "..."}}
+        err = data.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message") or ""
+            etype = err.get("type") or ""
+            code = err.get("code") or ""
+            parts = []
+            if msg: parts.append(msg)
+            if etype: parts.append(f"type={etype}")
+            if code: parts.append(f"code={code}")
+            return " | ".join(parts) if parts else str(err)[:500]
+        # 2. {"message": "..."}
+        if data.get("message"):
+            return str(data["message"])[:500]
+        # 3. {"detail": "..."}
+        if data.get("detail"):
+            detail = data["detail"]
+            return str(detail if isinstance(detail, str) else detail)[:500]
+        # 4. {"msg": "..."}
+        if data.get("msg"):
+            return str(data["msg"])[:500]
+        # 5. {"error": "string"} (非 dict)
+        if isinstance(err, str) and err:
+            return err[:500]
+        # 6. Ollama: {"error": "..."} 有时在顶层
+        # 7. fallback 到原始文本
+        return raw_text[:500] or f"(empty body, status {response.status_code})"
+
     def _build_payload(self, messages: List[Dict[str, Any]], tools: Optional[List] = None, stream: bool = False) -> Dict[str, Any]:
         payload = {
             "model": self.model,
@@ -91,11 +129,7 @@ class LLMClient:
             raise LLMError(0, f"网络错误: {str(e)}")
         
         if response.status_code >= 400:
-            try:
-                error_data = response.json()
-                error_msg = error_data.get("error", {}).get("message", response.text)
-            except:
-                error_msg = response.text
+            error_msg = self._extract_error_message(response)
             raise LLMError(response.status_code, error_msg)
         
         if not stream:

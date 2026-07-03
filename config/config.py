@@ -56,7 +56,7 @@ DEFAULT_CONFIG = {
         }
     },
     "memory": {
-        "max_history": 20
+        "max_history": 50
     },
     "wechat": {
         "enabled": False,
@@ -121,7 +121,7 @@ tools:
 memory:
   # 最大保留对话轮数（每轮=用户提问+AI回复）
   # 超过后自动丢弃最早的对话，避免token超限
-  max_history: 20
+  max_history: 50
 """
 
 

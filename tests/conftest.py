@@ -39,9 +39,11 @@ def mock_llm():
 
 @pytest.fixture
 def tmp_memory_file(tmp_path, monkeypatch):
-    """让 LongTermMemory 写到临时目录，避免污染真实数据。"""
+    """让 LongTermMemory 和 TodoList 写到临时目录，避免污染真实数据。"""
     from core import long_term_memory as ltm_module
+    from core import todo as todo_module
     fake_dir = tmp_path / "mingcode_test"
     fake_dir.mkdir()
     monkeypatch.setattr(ltm_module, "get_user_data_dir", lambda: fake_dir)
+    monkeypatch.setattr(todo_module, "get_user_data_dir", lambda: fake_dir)
     return fake_dir
