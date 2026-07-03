@@ -280,7 +280,7 @@ def test_computer_click_missing_coords():
 
 def test_computer_key_disallowed():
     from tools.computer_use import ComputerUseTool
-    result = ComputerUseTool().execute(action="key", keys="ctrl+alt+delete")
+    result = ComputerUseTool().execute(action="key", keys="ctrl+pause")
     assert "Error" in result or "disallowed" in result.lower()
 
 
@@ -324,12 +324,36 @@ def test_computer_drag_missing_coords():
 def test_all_new_tools_registered_in_main_agent():
     """主 agent 应注册全部 5 个新工具。"""
     agent = __import__("core.agent", fromlist=["NeonAgent"]).NeonAgent(cfg.DEFAULT_CONFIG)
-    try:
-        tools = agent.registry.list_tools()
-        assert "time" in tools
-        assert "math" in tools
-        assert "http" in tools
-        assert "git" in tools
-        assert "computer" in tools
-    finally:
-        agent._executor.shutdown(wait=False)
+    tools = agent.registry.list_tools()
+    assert "time" in tools
+    assert "math" in tools
+    assert "http" in tools
+    assert "git" in tools
+    assert "computer" in tools
+
+
+def test_execute_tool_with_name_kwarg_no_conflict():
+    """回归测试：工具参数名 'name' 不能与 execute_tool 的第一位置参数冲突。
+
+    Bug: execute_tool(self, name, **kwargs) 在 AI 调用 computer(action='open_app', name='微信')
+    时会把位置参数 name='computer' 与关键字 name='微信' 视为重复赋值。
+    修复: 第一参数重命名为 tool_name。
+    """
+    from tools.base import ToolRegistry, BaseTool
+
+    class DummyTool(BaseTool):
+        name = "dummy"
+        description = "test"
+        parameters = {"type": "object", "properties": {
+            "action": {"type": "string"},
+            "name": {"type": "string"},
+        }, "required": ["action"]}
+        def execute(self, **kwargs):
+            return f"action={kwargs.get('action')}, name={kwargs.get('name')}"
+
+    reg = ToolRegistry()
+    reg.register(DummyTool())
+    # 这个调用在 bug 版本会报 "got multiple values for argument 'name'"
+    result = reg.execute_tool("dummy", action="open_app", name="微信")
+    assert "action=open_app" in result
+    assert "name=微信" in result

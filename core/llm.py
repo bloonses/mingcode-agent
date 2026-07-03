@@ -187,7 +187,10 @@ class LLMClient:
 
     def _handle_non_stream(self, response: requests.Response) -> Dict[str, Any]:
         data = response.json()
-        choice = data["choices"][0]
+        choices = data.get("choices") or []
+        if not choices:
+            raise LLMError(response.status_code, f"LLM 返回空 choices（响应体: {str(data)[:300]}）")
+        choice = choices[0]
         message = choice["message"]
         result = {
             "role": message.get("role", "assistant"),
@@ -213,7 +216,7 @@ class LLMClient:
                     break
                 try:
                     data = json.loads(data_str)
-                    choice = data.get("choices", [{}])[0]
+                    choice = (data.get("choices") or [{}])[0]
                     delta = choice.get("delta", {})
                     
                     if delta.get("content"):

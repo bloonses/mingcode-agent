@@ -45,8 +45,4 @@ def test_registered_in_main_agent():
     from core.agent import NeonAgent
     fake_config = cfg.DEFAULT_CONFIG
     agent = NeonAgent(fake_config)
-    try:
-        assert "ask_user" in agent.registry.list_tools()
-    finally:
-        # NeonAgent 创建了 ThreadPoolExecutor，需要清理
-        agent._executor.shutdown(wait=False)
+    assert "ask_user" in agent.registry.list_tools()

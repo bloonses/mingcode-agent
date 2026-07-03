@@ -122,7 +122,4 @@ def test_registered_in_main_agent():
     import config.config as cfg
     from core.agent import NeonAgent
     agent = NeonAgent(cfg.DEFAULT_CONFIG)
-    try:
-        assert "todo" in agent.registry.list_tools()
-    finally:
-        agent._executor.shutdown(wait=False)
+    assert "todo" in agent.registry.list_tools()

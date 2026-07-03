@@ -6,24 +6,39 @@ action: screenshot / click / double_click / right_click / move / drag /
 依赖 pyautogui（鼠标键盘）+ Pillow（截屏）。
 """
 import os
+import sys
 import time
 from typing import Optional, List
 
 from .base import BaseTool
 
 
-# 可选依赖，运行时检测
-try:
-    import pyautogui
-    pyautogui_available = True
-except ImportError:
-    pyautogui_available = False
+# 可选依赖，运行时检测（含 PyInstaller frozen 模式提示）
+def _check_optional(name, frozen_hint, source_hint):
+    """检测可选依赖，返回 (available, error_hint)。"""
+    try:
+        __import__(name)
+        return True, ""
+    except ImportError:
+        hint = frozen_hint if getattr(sys, "frozen", False) else source_hint
+        return False, hint
 
-try:
-    from PIL import ImageGrab
-    pil_available = True
-except ImportError:
-    pil_available = False
+
+pyautogui_available, pyautogui_error_hint = _check_optional(
+    "pyautogui",
+    "pyautogui 未打包进可执行文件。请用源码运行 mingcode（python main.py），或重新打包时确认 mingcode.spec 的 hiddenimports 包含 'pyautogui'。",
+    "pyautogui 未安装。请运行: pip install pyautogui",
+)
+pil_available, pil_error_hint = _check_optional(
+    "PIL.ImageGrab",
+    "Pillow 未打包进可执行文件。请用源码运行 mingcode（python main.py），或重新打包时确认 mingcode.spec 的 hiddenimports 包含 'PIL' 和 'PIL.ImageGrab'。",
+    "Pillow 未安装。请运行: pip install Pillow",
+)
+# 模块级 ImageGrab / pyautogui 引用（若依赖可用则绑定，便于运行时调用和测试 monkeypatch）
+if pil_available:
+    from PIL import ImageGrab  # noqa: E402
+if pyautogui_available:
+    import pyautogui  # noqa: E402
 
 
 # 安全键白名单（避免 LLM 乱按系统组合键）
@@ -80,7 +95,7 @@ class ComputerUseTool(BaseTool):
             "text": {"type": "string", "description": "action=type 时要输入的文本"},
             "keys": {"type": "string", "description": "action=key 时按键组合如 'ctrl+c' 或 'enter'"},
             "clicks": {"type": "integer", "description": "action=scroll 时滚动次数，正向上负向下"},
-            "name": {"type": "string", "description": "action=open_app 时程序名称"},
+            "name": {"type": "string", "description": "action=open_app 时程序名称（支持中文名如'微信'、可执行名如'notepad'、完整路径）"},
             "title": {"type": "string", "description": "action=focus 时窗口标题（部分匹配）"}
         },
         "required": ["action"]
@@ -99,7 +114,7 @@ class ComputerUseTool(BaseTool):
             )
 
         if not pyautogui_available:
-            return "Error: pyautogui not installed. Run: pip install pyautogui"
+            return f"Error: {pyautogui_error_hint}"
 
         if action in ("click", "double_click", "right_click"):
             return self._click(action, kwargs.get("x"), kwargs.get("y"))
@@ -123,7 +138,7 @@ class ComputerUseTool(BaseTool):
 
     def _screenshot(self, x=None, y=None, w=None, h=None) -> str:
         if not pil_available:
-            return "Error: Pillow not installed. Run: pip install Pillow"
+            return f"Error: {pil_error_hint}"
         try:
             from config.config import get_user_data_dir
             from ui.console import print_screenshot_thumbnail
@@ -160,12 +175,28 @@ class ComputerUseTool(BaseTool):
                     pass
 
             # 调用 vision LLM 分析画面（失败降级为提示，不影响截屏结果）
+            # 要求 LLM 返回结构化坐标清单，AI 可直接读取坐标进行点击
             if self.llm_client is not None:
                 try:
                     from core.llm import LLMError
                     vision_prompt = (
-                        f"描述这个屏幕截图（{region_desc}）的主要元素："
-                        f"窗口布局、可见文本、可点击元素的位置"
+                        f"仔细分析这个屏幕截图（{region_desc}），列出所有可交互元素及其精确坐标位置。\n"
+                        f"要求高精度检测：包括桌面图标（通常 32x32 或 48x48 像素，紧密排列）、"
+                        f"任务栏图标、系统托盘小图标、窗口标题栏按钮、菜单项、小型工具栏按钮等小元素。\n"
+                        f"不要遗漏任何可交互元素，即使很小也要列出。\n\n"
+                        f"按以下格式输出，每行一个元素：\n"
+                        f"[type] \"label\" (x={{center_x}}, y={{center_y}}, w={{width}}, h={{height}}) - 可操作描述\n\n"
+                        f"类型包括：button（按钮）、input（输入框）、link（链接）、"
+                        f"menu（菜单项）、icon（图标按钮/桌面图标）、tray（系统托盘图标）、"
+                        f"taskbar（任务栏图标）、text（仅显示，不可点击）。\n\n"
+                        f"示例：\n"
+                        f"[button] \"确定\" (x=320, y=180, w=80, h=30) - 点击确认\n"
+                        f"[input] 搜索框 (x=250, y=50, w=200, h=24) - 点击后可输入文字\n"
+                        f"[icon] 关闭按钮 (x=780, y=20, w=20, h=20) - 点击关闭窗口\n"
+                        f"[icon] 桌面图标\"此电脑\" (x=50, y=80, w=48, h=48) - 双击打开\n"
+                        f"[tray] 音量图标 (x=1820, y=1055, w=20, h=20) - 单击调节音量\n"
+                        f"[text] \"欢迎使用\" (x=400, y=100, w=120, h=20) - 仅显示，不可点击\n\n"
+                        f"最后用一句话总结画面整体布局。"
                     )
                     description = self.llm_client.chat_with_image(
                         prompt=vision_prompt,
@@ -179,21 +210,26 @@ class ComputerUseTool(BaseTool):
             else:
                 vision_section = "Vision analysis:\n(llm_client not configured)"
 
+            # 截图用完即删（避免磁盘累积；缩略图已渲染、vision 已分析，文件不再需要）
+            try:
+                os.remove(str(filepath))
+                file_status = f"(temp file removed: {filepath.name})"
+            except Exception:
+                file_status = f"(saved: {filepath})"
+
             return (
-                f"Screenshot saved: {filepath}\n"
+                f"Screenshot captured: {filepath.name}\n"
                 f"Size: {img.size[0]}x{img.size[1]}\n"
-                f"Region: {region_desc}\n\n"
+                f"Region: {region_desc}\n"
+                f"{file_status}\n\n"
                 f"{vision_section}"
             )
         except Exception as e:
             return f"Error: {e}"
 
     def _confirm(self, msg: str) -> bool:
-        try:
-            ans = input(f"\nConfirm: {msg}? [y/N] ").strip().lower()
-            return ans in ("y", "yes")
-        except (EOFError, KeyboardInterrupt):
-            return False
+        # 默认 yes 执行，不再向用户提问（codex 风格：AI 自主操作）
+        return True
 
     def _click(self, action: str, x, y) -> str:
         if x is None or y is None:
@@ -282,15 +318,48 @@ class ComputerUseTool(BaseTool):
             return "Error: name is required for open_app"
         if not self._confirm(f"open app '{name}'"):
             return "Cancelled."
-        try:
-            import subprocess
-            if os.name == "nt":
-                subprocess.Popen(["start", "", name], shell=True)
-            else:
+        import subprocess
+        if os.name == "nt":
+            # Windows 应用启动策略（按优先级）：
+            # 1) 路径/可执行文件（含 \\ 或 / 或 .exe 后缀）→ 直接 start
+            # 2) 应用名（中文如"微信"、英文如"notepad"）→ PowerShell Get-StartApps 反查 AppID
+            #    （start 命令不解析开始菜单应用名，直接 start "微信" 会报"系统找不到文件"）
+            is_path_or_exe = (
+                "\\" in name or "/" in name
+                or name.lower().endswith(".exe")
+                or (len(name) <= 12 and name.isascii() and " " not in name)
+            )
+            if is_path_or_exe:
+                try:
+                    subprocess.Popen(f'start "" "{name}"', shell=True)
+                    return f"Launched: {name}"
+                except Exception as e:
+                    return f"Error: {e}"
+            # 应用名：用 PowerShell Get-StartApps 反查 AppID
+            try:
+                # 转义 PS 字符串中的单引号
+                ps_name = name.replace("'", "''")
+                ps_cmd = (
+                    f"Get-StartApps | Where-Object {{$_.Name -like '*{ps_name}*'}} "
+                    f"| Select-Object -First 1 -ExpandProperty AppID"
+                )
+                r = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True, text=True, timeout=10,
+                )
+                appid = (r.stdout or "").strip().splitlines()[0] if r.stdout else ""
+                if appid:
+                    subprocess.Popen(f'start "" "{appid}"', shell=True)
+                    return f"Launched: {name} (via AppID: {appid})"
+                return f"Error: app '{name}' not found in Start menu"
+            except Exception as e:
+                return f"Error: {e}"
+        else:
+            try:
                 subprocess.Popen([name])
-            return f"Launched: {name}"
-        except Exception as e:
-            return f"Error: {e}"
+                return f"Launched: {name}"
+            except Exception as e:
+                return f"Error: {e}"
 
     def _window_list(self) -> str:
         try:

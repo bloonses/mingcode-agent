@@ -44,8 +44,8 @@ class ToolRegistry:
     def get_all_schemas(self) -> list[dict]:
         return [tool.to_schema() for tool in self._tools.values()]
 
-    def execute_tool(self, name: str, **kwargs) -> str:
-        tool = self.get(name)
+    def execute_tool(self, tool_name: str, **kwargs) -> str:
+        tool = self.get(tool_name)
         if tool is None:
-            return f"Error: Tool '{name}' not found"
+            return f"Error: Tool '{tool_name}' not found"
         return tool.safe_execute(**kwargs)

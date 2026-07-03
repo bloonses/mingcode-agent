@@ -1,4 +1,4 @@
-# 🚀 MINGCODE 保姆级复刻学习路线 v1.0.5
+# 🚀 MINGCODE 保姆级复刻学习路线 v1.0.6
 
 **总周期：10-12周 | 每日投入：1-2小时 | 目标：1:1完整复刻**
 
@@ -58,6 +58,9 @@
 | **多模态消息格式** | chat_with_image 用 OpenAI vision 标准：content 为 list，含 text + image_url（base64 data URI） |
 | **ANSI 半块字符渲染** | print_screenshot_thumbnail 用 ▀ 字符 + truecolor 一次显示两行像素，codex 风格终端缩略图 |
 | **三路独立降级** | screenshot 内截屏/vision/缩略图三者异常互不影响，分别降级为 Error/placeholder/跳过 |
+| **串行 ReAct 循环** | 同一轮多个 tool_calls 改为 for 循环串行执行（替代 ThreadPoolExecutor），思考一步执行一步，每个工具结果出来后立即输出 |
+| **参数名冲突坑** | execute_tool(self, name, **kwargs) 的位置参数 name 会与工具参数 name="微信" 冲突，必须重命名为 tool_name |
+| **模块级 import 检测坑** | _check_optional("pyautogui") 只检测不导入，模块级名字未绑定会报 NameError，必须 if available: import xxx |
 
 ### 项目架构总览
 ```
@@ -974,6 +977,13 @@ self.registry.register(TodoTool(self.todo_list))
 | mock PIL.ImageGrab | ⭐⭐⭐⭐ | 测试中 monkeypatch ImageGrab.grab 返回 MagicMock img，避免真截屏 |
 | patch create=True | ⭐⭐⭐ | pyautogui 未安装时模块无该属性，patch.object 用 `create=True` 允许创建 |
 | Rich markup=False | ⭐⭐⭐ | Rich 会把 `[text]` 当样式标签吞掉，打印含方括号的提示行需 `markup=False` |
+| 串行 ReAct 循环 | ⭐⭐⭐⭐⭐ | 同一轮多个 tool_calls 用 for 循环串行执行（替代 ThreadPoolExecutor），思考一步执行一步 |
+| 可选依赖模块级 import | ⭐⭐⭐⭐⭐ | _check_optional 只检测不导入，必须 `if available: import xxx` 在模块级绑定名字，否则 NameError |
+| 参数名冲突规避 | ⭐⭐⭐⭐ | execute_tool 第一参数不能叫 name（会与工具参数 name 冲突），必须重命名为 tool_name |
+| PowerShell Get-StartApps | ⭐⭐⭐⭐ | Windows start 命令不解析应用名（如"微信"），必须用 PowerShell Get-StartApps 反查 AppID 启动 |
+| 高精度 vision prompt | ⭐⭐⭐⭐ | prompt 明确要求检测小元素（桌面图标 32x32、托盘图标 20x20），坐标带 w/h 尺寸 |
+| 截图用完即删 | ⭐⭐⭐⭐ | vision 分析完成后 os.remove 删除截图文件，避免磁盘累积临时文件 |
+| codex 自主执行 | ⭐⭐⭐ | _confirm 直接返回 True，移除所有写操作的用户确认提示，AI 自主操作 |
 
 ### 🎯 练习任务
 1. **Task 1**：TDD 实现 LLMClient.chat_with_image
@@ -1062,8 +1072,69 @@ console.print("[thumbnail unavailable: Pillow not installed]")
 console.print("[thumbnail unavailable: Pillow not installed]", markup=False)
 ```
 
+### 🛠️ 工程改进（v1.1.0）
+本阶段在初版完成后做了若干工程改进，建议学习者按顺序对照实现，每改完一步跑测试验证无回归：
+
+| 改进点 | 原问题 | 改进方案 | 涉及文件 |
+|--------|--------|----------|----------|
+| 串行 ReAct 循环 | ThreadPoolExecutor 并行执行导致工具结果顺序错乱、用户难以"思考一步看一步" | 改为 for 循环串行执行，每个工具结果出来后立即输出 | [core/agent.py](file:///c:/Users/bloon/Downloads/neon_agent/core/agent.py) |
+| 模块级 import 检测 | `_check_optional("pyautogui")` 只检测不导入，模块级名字未绑定，运行时报 `NameError: name 'pyautogui' is not defined` | 检测后立即 `if available: import xxx` 在模块级绑定名字 | [tools/computer_use.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/computer_use.py#L37-L41) |
+| 参数名冲突规避 | `execute_tool(self, name, **kwargs)` 第一参数 `name` 与工具参数 `name="微信"` 冲突，报 `got multiple values for argument 'name'` | 第一参数重命名为 `tool_name`，并加回归测试 `test_execute_tool_with_name_kwarg_no_conflict` | [tools/base.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/base.py) |
+| PowerShell Get-StartApps | Windows `start "微信"` 不解析应用名，报"系统找不到文件 微信" | 区分路径/exe 和应用名，应用名走 `Get-StartApps` 反查 AppID 启动 | [tools/computer_use.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/computer_use.py#L316-L360) |
+| 高精度 vision prompt | 默认 prompt 漏检桌面图标、托盘图标等小元素 | prompt 明确要求检测 32x32/48x48 小元素，坐标带 w/h 尺寸，给出示例 | [tools/computer_use.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/computer_use.py#L182-L200) |
+| 截图用完即删 | 截图文件累积在 user_data_dir/screenshots 占磁盘 | vision 分析完成后 `os.remove` 删除临时文件，并加 `test_screenshot_file_removed_after_use` | [tools/computer_use.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/computer_use.py#L213-L218) |
+| codex 自主执行 | 每个写操作都弹 `Confirm: ... [y/N]` 阻塞 AI 自主循环 | `_confirm` 直接返回 True，移除所有用户确认提示 | [tools/computer_use.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/computer_use.py#L230-L232) |
+| 空 choices 保护 | LLM 返回 `{"choices": []}` 时 `data.get("choices", [{}])[0]` 报 `list index out of range` | 改为 `(data.get("choices") or [{}])[0]`，非流式显式 `if not choices: raise LLMError` | [core/llm.py](file:///c:/Users/bloon/Downloads/neon_agent/core/llm.py) |
+
+**串行 ReAct 循环核心代码**：
+```python
+# 改进前（并行，结果顺序错乱）
+with ThreadPoolExecutor(max_workers=4) as ex:
+    futures = [ex.submit(_exec_one, pc) for pc in parsed_calls]
+    for fut in futures:
+        call_id, tool_name, arguments, result, error = fut.result()
+        # ... 收集所有结果后一次性输出 ...
+
+# 改进后（串行，思考一步执行一步）
+for pc in parsed_calls:
+    call_id, tool_name, arguments, result, error = _exec_one(pc)
+    # ... 立即处理并输出此工具结果 ...
+    self.memory.add_message("tool", result, tool_call_id=call_id)
+```
+
+**模块级 import 检测的正确写法**：
+```python
+# 错误：_check_optional 只检测不导入，模块级名字未绑定
+pyautogui_available, _ = _check_optional("pyautogui", ...)
+def click(...):
+    pyautogui.click(x, y)  # NameError: name 'pyautogui' is not defined
+
+# 正确：检测后立即在模块级 import
+pyautogui_available, _ = _check_optional("pyautogui", ...)
+if pyautogui_available:
+    import pyautogui  # noqa: E402  模块级绑定名字
+```
+
+**PowerShell Get-StartApps 反查 AppID**：
+```python
+# Windows start 命令不解析应用名（如"微信"），直接 start "微信" 会报错
+# 必须用 PowerShell Get-StartApps 反查 AppID
+ps_cmd = (
+    f"Get-StartApps | "
+    f"Where-Object {{$_.Name -like '*{ps_name}*'}} | "
+    f"Select-Object -First 1 -ExpandProperty AppID"
+)
+result = subprocess.run(
+    ["powershell", "-NoProfile", "-Command", ps_cmd],
+    capture_output=True, text=True, timeout=10,
+)
+app_id = result.stdout.strip()
+if app_id:
+    subprocess.Popen(f'start "" "shell:AppsFolder\\{app_id}"', shell=True)
+```
+
 ### ✅ 验收标准
-- [ ] 全部测试通过（116+ 个）
+- [ ] 全部测试通过（118+ 个）
 - [ ] chat_with_image 返回 LLM 响应的 content 字符串
 - [ ] chat_with_image 构造的 user content 是 list 形式含 text + image_url
 - [ ] chat_with_image 遇 LLMError 向上抛出（由调用方降级）
@@ -1125,6 +1196,10 @@ console.print("[thumbnail unavailable: Pillow not installed]", markup=False)
 | [ANSI 转义码参考](https://en.wikipedia.org/wiki/ANSI_escape_code) | truecolor 24-bit 颜色码格式（阶段十二缩略图渲染） |
 | Python 官方文档 - uuid 模块 | TodoList 短 id 生成参考 |
 | [Dependency Injection in Python](https://python-dependency-injector.ets.liniotech.com/) | 依赖注入模式深入（可选） |
+| [pyautogui 文档](https://pyautogui.readthedocs.io/) | 鼠标键盘自动化、屏幕定位（阶段十二 computer use） |
+| [PowerShell Get-StartApps](https://learn.microsoft.com/powershell/module/microsoft.powershell.management/) | Windows 开始菜单应用 AppID 反查（阶段十二 open_app） |
+| [OpenAI Computer Use Guide](https://platform.openai.com/docs/guides/computer-use) | Codex computer use 设计理念与最佳实践（阶段十二对标参考） |
+| [PyInstaller Hidden Imports](https://pyinstaller.org/en/stable/usage.html) | frozen 模式下可选依赖打包配置（阶段十二跨环境运行） |
 
 ---
 
@@ -1143,6 +1218,9 @@ console.print("[thumbnail unavailable: Pillow not installed]", markup=False)
 12. **共享实例设计要理解透** - TodoList 在 NeonAgent 创建一次，AI 工具和 /todo 命令注入同一实例，这是"AI 与用户协同"的核心模式，理解后可应用到其他共享状态场景
 13. **阶段十二是多模态能力关键** - chat_with_image 让 AI 从"只读文本"升级为"能看见屏幕"，是对标 Codex computer use 的核心能力。建议先用一个支持 vision 的 model 测试（如 glm-4v / qwen-vl-plus / gpt-4o），理解多模态消息格式后再做缩略图渲染
 14. **三路独立降级是工程关键** - 截屏/vision/缩略图三者异常互不影响，这种"局部失败不拖全局"的设计在多步骤工具中非常重要，理解后可应用到其他涉及多个外部依赖的工具
+15. **工程改进是迭代必修课** - 阶段十二的 v1.1.0 工程改进都是真实使用中暴露的问题：串行 vs 并行、模块级 import 检测、参数名冲突、Windows start 命令解析等。建议按"工程改进"表格逐项对照实现，每改完一步跑 `python -m pytest tests/ -q --tb=short` 确认无回归。这些坑都很典型，遇到报错时先看错误信息（`NameError` / `got multiple values for argument` / `list index out of range`）就能定位到对应改进点
+16. **GUI 自动化优先用"截屏+点击"而非 shell** - ComputerUseTool 默认走 `screenshot → click/type → screenshot 验证 → 循环` 的工作流，而不是用大量 shell 命令。原因：(1) shell 启动应用难定位窗口位置；(2) 点击坐标可跨应用复用；(3) vision LLM 返回结构化坐标清单可直接喂给下一步。理解这个工作流后，可应用到 RPA、自动化测试、远程协助等场景
+17. **codex 自主执行的边界** - `_confirm` 直接返回 True 让 AI 自主循环不卡顿，但这也意味着 AI 可能误删文件、误点按钮。生产环境建议加白名单（仅允许 click/type，禁止 drag/key 系统组合键）+ 关键操作二次确认（如删除文件、发送消息）。本项目的安全键白名单 `_SAFE_KEYS` 是基础防护，可在此基础上扩展
 
 ---
 

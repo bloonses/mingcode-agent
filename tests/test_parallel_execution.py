@@ -37,18 +37,18 @@ class SlowTool:
         }
 
 
-def test_parallel_tool_calls_run_concurrently(mock_llm, tmp_memory_file):
-    """两个慢工具并行执行，总耗时约等于单个耗时而非两倍。"""
+def test_serial_tool_calls_run_sequentially(mock_llm, tmp_memory_file):
+    """两个慢工具串行执行，总耗时约等于两倍单个耗时（思考一步执行一步）。"""
     import json
     mock_llm.set_responses([
         {
             "role": "assistant",
-            "content": "并行执行两个",
+            "content": "串行执行两个",
             "tool_calls": [
                 {"id": "c1", "type": "function",
-                 "function": {"name": "slow", "arguments": json.dumps({"seconds": 2})}},
+                 "function": {"name": "slow", "arguments": json.dumps({"seconds": 1})}},
                 {"id": "c2", "type": "function",
-                 "function": {"name": "slow", "arguments": json.dumps({"seconds": 2})}},
+                 "function": {"name": "slow", "arguments": json.dumps({"seconds": 1})}},
             ],
         },
         {"role": "assistant", "content": "Final Answer: done", "tool_calls": None},
@@ -67,15 +67,16 @@ def test_parallel_tool_calls_run_concurrently(mock_llm, tmp_memory_file):
     # 替换 registry 只留慢工具
     from tools.base import ToolRegistry
     agent.registry = ToolRegistry()
-    agent.registry.register(SlowTool(duration=2))
+    agent.registry.register(SlowTool(duration=1))
     agent.memory.build_system_prompt(agent.registry.get_all_schemas())
 
     start = time.time()
-    chunks = list(agent.chat("并行执行"))
+    chunks = list(agent.chat("串行执行"))
     elapsed = time.time() - start
 
-    # 并行：约 2s；串行会是 4s。设阈值 3.5s 容错。
-    assert elapsed < 3.5, f"并行执行耗时 {elapsed:.1f}s，预期 < 3.5s"
+    # 串行：约 2s（1+1）。断言 >= 1.5s 确认是串行而非并行。
+    assert elapsed >= 1.5, f"串行执行耗时 {elapsed:.1f}s，预期 >= 1.5s（应为两段串行）"
+    assert elapsed < 3.5, f"串行执行耗时 {elapsed:.1f}s，预期 < 3.5s"
 
 
 def test_main_agent_has_task_tool():

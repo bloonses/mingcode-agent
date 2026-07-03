@@ -435,7 +435,7 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print(f"[{NEON_TEAL} bold]═══ MINGCODE Diagnostic ═══[/{NEON_TEAL} bold]")
         console.print()
         console.print("[bold]Environment[/bold]")
-        console.print(f"  Version:       1.0.9")
+        console.print(f"  Version:       1.1.0")
         console.print(f"  Python:       {sys.version.split()[0]}")
         console.print(f"  Platform:     {sys.platform}")
         console.print(f"  Frozen:       {getattr(sys, 'frozen', False)}")

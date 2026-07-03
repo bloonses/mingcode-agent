@@ -1,5 +1,4 @@
 import json
-from concurrent.futures import ThreadPoolExecutor
 from typing import Generator, Dict, Any, Optional, List
 
 from core.llm import LLMClient
@@ -43,7 +42,6 @@ class NeonAgent:
         self.registry = ToolRegistry()
         self._register_tools()
         self.memory.build_system_prompt(self.registry.get_all_schemas())
-        self._executor = ThreadPoolExecutor(max_workers=4)
 
     def _register_tools(self):
         self.registry.register(ShellTool())
@@ -153,7 +151,7 @@ class NeonAgent:
                             "arguments": arguments,
                         })
 
-                    # 并行执行工具
+                    # 串行执行并处理（思考一步执行一步：每个工具执行完立即输出结果）
                     def _exec_one(pc):
                         cid = pc["call_id"]
                         tn = pc["tool_name"]
@@ -164,11 +162,8 @@ class NeonAgent:
                         except Exception as e:
                             return cid, tn, ag, None, str(e)
 
-                    futures = [self._executor.submit(_exec_one, pc) for pc in parsed_calls]
-                    results = [f.result() for f in futures]
-
-                    # 按原顺序处理结果
-                    for call_id, tool_name, arguments, result, error in results:
+                    for pc in parsed_calls:
+                        call_id, tool_name, arguments, result, error = _exec_one(pc)
                         if error is not None:
                             result = f"工具执行错误: {error}"
                             last_error = error

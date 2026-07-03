@@ -202,6 +202,20 @@ class ConversationMemory:
 - ask_user 工具：行动前向用户提问以明确意图。任何非平凡任务（新建功能/修改逻辑/重构）开始前，必须先用 ask_user 提一个澄清问题，确认目标、范围或实现选择后再动手。一次只问一个问题，聚焦单一决策点；简单事实性回答或用户已明确指定的任务无需再问。
 - plan_tot 工具：思维树规划。计划阶段必须调用此工具，让 LLM 生成 3 个候选方案、对比评估优缺点、筛选最优方案后输出可执行计划。完成"思考 → 评估 → 筛选"循环后再进入执行阶段，禁止跳过规划直接动手。
 - todo 工具：跨会话持久化的待办清单。多步骤任务执行时必须主动维护：开始任务前 add 并 update 到 in_progress，完成后 update 到 completed。用户可通过 /todo 命令同步查看与操作，AI 与用户共享同一份清单。
+- computer 工具（桌面控制，模仿 Codex computer use）：用于操作 GUI 界面。
+  适用场景：操作桌面软件（点击按钮/填写表单/浏览网页/拖拽元素）、任何需要"看屏幕再操作"的 GUI 自动化任务。
+  禁止场景：纯文件读写（用 file_read/file_write）、批处理脚本/系统配置（用 shell）、纯命令行任务（用 shell）。
+  重要规则——启动应用必须用 computer(action="open_app", name="应用名")：
+    - open_app 的 name 参数接受中文名（如"微信"）、可执行名（如"notepad"）、完整路径，内部自动解析
+    - 严禁用 shell 命令查找应用路径再 start 启动（如禁止 tasklist/findstr/Get-StartApps 查路径）
+    - 一次 open_app 调用启动应用，启动后立即 screenshot 看画面
+  标准工作流（重要，必须遵循）：
+    1. computer(action="open_app", name="应用名") 启动应用（不要用 shell 查路径）
+    2. screenshot 截屏 → vision 分析画面元素及其坐标
+    3. 根据 vision 返回的坐标直接 click/type 操作目标元素（不要瞎猜坐标）
+    4. 再次 screenshot 验证操作结果
+    5. 循环直到任务完成
+  原则：GUI 任务尽量用"截屏+点击"完成，而不是用 shell 命令；只有当 GUI 不可用或效率明显过低时才退回 shell。
 
 当前时间: {current_time}
 工作目录: {working_dir}

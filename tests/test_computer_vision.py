@@ -195,7 +195,7 @@ class TestScreenshotRegion:
         tool = ComputerUseTool()
         result = tool.execute(action="screenshot")
 
-        assert "Screenshot saved" in result
+        assert "Screenshot captured" in result
         assert "1920x1080" in result
         # 验证 ImageGrab.grab 被无 bbox 调用
         import tools.computer_use as cu_mod
@@ -215,7 +215,7 @@ class TestScreenshotRegion:
         tool = ComputerUseTool()
         result = tool.execute(action="screenshot", x=100, y=50, w=800, h=600)
 
-        assert "Screenshot saved" in result
+        assert "Screenshot captured" in result
         assert "800x600" in result
         # 验证 bbox 参数
         cu_mod.ImageGrab.grab.assert_called_once_with(bbox=(100, 50, 900, 650))
@@ -235,7 +235,7 @@ class TestScreenshotRegion:
         # 只传 x 不传 w/h，应降级
         result = tool.execute(action="screenshot", x=100)
 
-        assert "Screenshot saved" in result
+        assert "Screenshot captured" in result
         assert "fullscreen" in result.lower() or "fell back" in result.lower()
         cu_mod.ImageGrab.grab.assert_called_once_with()
 
@@ -259,7 +259,7 @@ class TestScreenshotVision:
 
         result = tool.execute(action="screenshot")
 
-        assert "Screenshot saved" in result
+        assert "Screenshot captured" in result
         assert "A window with a button at top-right" in result
         assert "Vision analysis" in result
         mock_llm.chat_with_image.assert_called_once()
@@ -284,8 +284,34 @@ class TestScreenshotVision:
         tool = ComputerUseTool()  # 无 llm_client
         result = tool.execute(action="screenshot")
 
-        assert "Screenshot saved" in result
+        assert "Screenshot captured" in result
         assert "llm_client not configured" in result
+
+    def test_screenshot_file_removed_after_use(self, tmp_path, monkeypatch):
+        """截图在 vision 分析后应被删除，避免磁盘累积。"""
+        import os
+        from tools.computer_use import ComputerUseTool
+        monkeypatch.setattr("config.config.get_user_data_dir", lambda: tmp_path)
+
+        # 用真实的 PIL Image 让 save 真正写文件，验证后续 os.remove 删除
+        from PIL import Image
+        real_img = Image.new("RGB", (100, 100), (0, 0, 0))
+        import tools.computer_use as cu_mod
+        monkeypatch.setattr(cu_mod, "pil_available", True, raising=False)
+        monkeypatch.setattr(cu_mod, "ImageGrab", MagicMock(), raising=False)
+        cu_mod.ImageGrab.grab = MagicMock(return_value=real_img)
+        monkeypatch.setattr("ui.console.print_screenshot_thumbnail", lambda *a, **kw: None)
+
+        tool = ComputerUseTool()
+        result = tool.execute(action="screenshot")
+
+        assert "Screenshot captured" in result
+        assert "temp file removed" in result
+        # screenshots 目录应无残留 png
+        shots_dir = tmp_path / "screenshots"
+        if shots_dir.exists():
+            pngs = list(shots_dir.glob("*.png"))
+            assert pngs == [], f"截图文件未删除: {pngs}"
 
     def test_screenshot_vision_error_degrades_gracefully(self, tmp_path, monkeypatch):
         """vision LLM 抛 LLMError 时，应降级为提示，不影响截屏结果。"""
@@ -305,7 +331,7 @@ class TestScreenshotVision:
         result = tool.execute(action="screenshot")
 
         # 截屏结果仍存在
-        assert "Screenshot saved" in result
+        assert "Screenshot captured" in result
         # vision 描述为降级提示
         assert "vision unavailable" in result.lower()
         assert "model does not support images" in result
