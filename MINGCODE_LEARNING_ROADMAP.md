@@ -1,6 +1,6 @@
-# 🚀 MINGCODE 保姆级复刻学习路线 v1.0.4
+# 🚀 MINGCODE 保姆级复刻学习路线 v1.0.5
 
-**总周期：9-11周 | 每日投入：1-2小时 | 目标：1:1完整复刻**
+**总周期：10-12周 | 每日投入：1-2小时 | 目标：1:1完整复刻**
 
 ---
 
@@ -55,6 +55,9 @@
 | **依赖注入** | AskUserTool 通过构造参数注入 prompt_func（默认 input），便于测试和未来接 IM 渠道 |
 | **思维树（ToT）单次调用** | PlanToTTool 用结构化 prompt 让 LLM 一次完成"3 候选→评估→筛选→最终计划"，避免多轮对话 |
 | **共享实例协同** | AI 工具（TodoTool）与用户命令（/todo）注入同一 TodoList 实例，操作完全同步 |
+| **多模态消息格式** | chat_with_image 用 OpenAI vision 标准：content 为 list，含 text + image_url（base64 data URI） |
+| **ANSI 半块字符渲染** | print_screenshot_thumbnail 用 ▀ 字符 + truecolor 一次显示两行像素，codex 风格终端缩略图 |
+| **三路独立降级** | screenshot 内截屏/vision/缩略图三者异常互不影响，分别降级为 Error/placeholder/跳过 |
 
 ### 项目架构总览
 ```
@@ -953,12 +956,139 @@ self.registry.register(TodoTool(self.todo_list))
 
 ---
 
+## 🟦 阶段十二：Computer Vision 与终端缩略图特效（5-7天）
+**目标：让 AI 真正"看见"屏幕——截屏后自动调多模态 LLM 分析画面，并在终端用半块字符渲染缩略图，对标 Codex computer use**
+
+> 💡 这是把 Agent 从"只能读文本"升级为"能看屏幕"的关键阶段。核心能力互补：chat_with_image 解决"画面理解"，print_screenshot_thumbnail 解决"视觉反馈"，区域截屏解决"token 节省"
+
+### 📚 核心知识点
+| 知识点 | 重要程度 | 说明 |
+|--------|---------|------|
+| 多模态 LLM 消息格式 | ⭐⭐⭐⭐⭐ | OpenAI vision 标准：content 为 list，含 text + image_url 两个 item，base64 编码图片为 data URI |
+| ANSI truecolor 半块字符 | ⭐⭐⭐⭐⭐ | ▀（U+2580）一次显示两行像素：上像素做前景色，下像素做背景色，2 像素合并为 1 字符 |
+| base64 图片编码 | ⭐⭐⭐⭐ | base64.b64encode 编码 PNG 文件为 ASCII 字符串，拼成 `data:image/png;base64,...` |
+| sanitize list 保护 | ⭐⭐⭐⭐⭐ | _sanitize_messages 遇到 list 形式 content（多模态）直接保留不规范化，避免破坏 image_url 结构 |
+| 依赖注入扩展 | ⭐⭐⭐⭐ | ComputerUseTool 构造接受 `llm_client=None`，向后兼容无参构造 |
+| 三路独立降级 | ⭐⭐⭐⭐⭐ | 截屏失败→return Error；vision 失败→placeholder 字符串；缩略图失败→打印提示，三者互不影响 |
+| 区域截屏 bbox 语义 | ⭐⭐⭐⭐ | `PIL.ImageGrab.grab(bbox=(x,y,x+w,y+h))`，部分参数缺失降级为全屏 |
+| mock PIL.ImageGrab | ⭐⭐⭐⭐ | 测试中 monkeypatch ImageGrab.grab 返回 MagicMock img，避免真截屏 |
+| patch create=True | ⭐⭐⭐ | pyautogui 未安装时模块无该属性，patch.object 用 `create=True` 允许创建 |
+| Rich markup=False | ⭐⭐⭐ | Rich 会把 `[text]` 当样式标签吞掉，打印含方括号的提示行需 `markup=False` |
+
+### 🎯 练习任务
+1. **Task 1**：TDD 实现 LLMClient.chat_with_image
+   - **RED**：写 4 个测试 `test_chat_with_image_returns_content` / `test_chat_with_image_builds_image_url_payload` / `test_chat_with_image_propagates_llm_error` / `test_sanitize_messages_preserves_list_content`
+   - **GREEN**：在 `core/llm.py` 新增 `chat_with_image(prompt, image_path, system=None)` 方法，base64 编码图片→构造 OpenAI 多模态 messages（content 为 list 含 text + image_url）→调 `self.chat(stream=False)`→返回 content 字符串
+   - 在 `_sanitize_messages` 加 list 保护分支：`isinstance(content, list)` 时直接保留不规范化
+2. **Task 2**：TDD 实现 print_screenshot_thumbnail
+   - **RED**：写 4 个测试 `test_thumbnail_renders_half_block_chars`（断言输出含 `\x1b[38;2;` 和 ▀）/ `test_thumbnail_respects_max_width` / `test_thumbnail_pillow_missing_prints_placeholder` / `test_thumbnail_image_error_prints_error_message`
+   - **GREEN**：在 `ui/console.py` 顶部加 `pil_available` 检测；末尾加 `print_screenshot_thumbnail(image_path, max_width=80)` 函数
+   - 算法：PIL.Image.open→等比缩放（高除 2 因半块）→resize→双重循环取像素→拼 ANSI truecolor 前景+背景色码 + ▀
+   - 用内置 `print` 而非 `console.print`（Rich 会把 ANSI 转义码当文本显示）
+3. **Task 3**：TDD 实现 ComputerUseTool 构造注入
+   - **RED**：写 2 个测试 `test_no_arg_construction_still_works` / `test_llm_client_injection`
+   - **GREEN**：在 `tools/computer_use.py` 的 ComputerUseTool 类顶部加 `__init__(self, llm_client=None)`，存 `self.llm_client`
+   - 向后兼容：`ComputerUseTool()` 无参构造仍工作（现有测试零改动）
+4. **Task 4**：TDD 实现 _screenshot 区域截屏
+   - **RED**：写 3 个测试 `test_screenshot_fullscreen_saves_and_returns_path` / `test_screenshot_region_uses_bbox` / `test_screenshot_region_partial_params_falls_back_to_fullscreen`
+   - **GREEN**：schema 加 w/h 参数；`_screenshot(x=None,y=None,w=None,h=None)` 四参数全有走 bbox，部分缺失降级全屏
+   - 返回值格式：`Screenshot saved: {path}\nSize: {w}x{h}\nRegion: {desc}`
+   - 调用 print_screenshot_thumbnail，失败不影响主流程
+5. **Task 5**：TDD 实现 _screenshot vision LLM 集成
+   - **RED**：写 4 个测试 `test_screenshot_with_llm_client_calls_vision` / `test_screenshot_without_llm_client_returns_placeholder` / `test_screenshot_vision_error_degrades_gracefully` / `test_screenshot_calls_thumbnail_renderer`
+   - **GREEN**：在 _screenshot 缩略图块之后、return 之前加 vision 调用块
+   - 降级链：llm_client=None→"(llm_client not configured)"；LLMError→"(vision unavailable: {e})"；其他异常→"(vision error: {e})"
+6. **Task 6**：NeonAgent 注册注入
+   - 在 `core/agent.py` 把 `ComputerUseTool()` 改为 `ComputerUseTool(llm_client=self.llm)`
+   - 运行全套测试验证无回归
+
+### 📂 对应项目文件参考
+- [core/llm.py](file:///c:/Users/bloon/Downloads/neon_agent/core/llm.py#L132-L155) - chat_with_image 方法（多模态调用）
+- [core/llm.py](file:///c:/Users/bloon/Downloads/neon_agent/core/llm.py#L90-L92) - sanitize list 保护分支
+- [ui/console.py](file:///c:/Users/bloon/Downloads/neon_agent/ui/console.py#L188-L216) - print_screenshot_thumbnail（ANSI 半块渲染）
+- [tools/computer_use.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/computer_use.py) - ComputerUseTool（构造注入 + screenshot 增强）
+- [core/agent.py](file:///c:/Users/bloon/Downloads/neon_agent/core/agent.py#L73) - 注册时注入 llm_client
+- [tests/test_computer_vision.py](file:///c:/Users/bloon/Downloads/neon_agent/tests/test_computer_vision.py) - 17 个测试（4+4+2+3+4）
+
+### 💡 关键提示
+多模态消息格式是 OpenAI vision 标准：
+```python
+messages = [{
+    "role": "user",
+    "content": [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+    ],
+}]
+```
+
+半块字符渲染算法（2 像素合并为 1 字符）：
+```python
+for y in range(0, resized.height, 2):
+    line = ""
+    for x in range(new_w):
+        upper = resized.getpixel((x, y))           # 上像素→前景色
+        lower = resized.getpixel((x, y+1))          # 下像素→背景色
+        line += f"\x1b[38;2;{upper[0]};{upper[1]};{upper[2]}m"  # 前景色
+        line += f"\x1b[48;2;{lower[0]};{lower[1]};{lower[2]}m"  # 背景色
+        line += "▀"                                # 半块字符
+    line += "\x1b[0m"                               # 行末重置
+    print(line)  # 用内置 print，不用 Rich（Rich 会吞 ANSI）
+```
+
+三路独立降级是核心设计（任一环节失败不影响其他）：
+```python
+try:
+    img = ImageGrab.grab(bbox=bbox)  # 截屏失败 → return Error（不到后续）
+    img.save(filepath)
+    try:
+        print_screenshot_thumbnail(filepath)  # 缩略图失败 → 打印提示，不抛
+    except: pass
+    if self.llm_client:
+        try:
+            desc = self.llm_client.chat_with_image(...)  # vision 失败 → placeholder
+        except LLMError as e:
+            desc = f"(vision unavailable: {e})"
+    # 全部成功 → 返回组合字符串
+except Exception as e:
+    return f"Error: {e}"
+```
+
+Rich markup 吞方括号的坑：
+```python
+# 错误：Rich 把 [text] 当样式标签，输出空行
+console.print("[thumbnail unavailable: Pillow not installed]")
+# 正确：markup=False 让 Rich 按字面文本渲染
+console.print("[thumbnail unavailable: Pillow not installed]", markup=False)
+```
+
+### ✅ 验收标准
+- [ ] 全部测试通过（116+ 个）
+- [ ] chat_with_image 返回 LLM 响应的 content 字符串
+- [ ] chat_with_image 构造的 user content 是 list 形式含 text + image_url
+- [ ] chat_with_image 遇 LLMError 向上抛出（由调用方降级）
+- [ ] _sanitize_messages 遇 list content 直接保留不规范化
+- [ ] print_screenshot_thumbnail 输出含 `\x1b[38;2;` 和 ▀ 字符
+- [ ] print_screenshot_thumbnail 遵守 max_width 限制
+- [ ] Pillow 未安装时打印 placeholder 不抛异常
+- [ ] ComputerUseTool() 无参构造仍工作（向后兼容）
+- [ ] ComputerUseTool(llm_client=mock) 注入成功
+- [ ] screenshot 全屏返回 "Region: fullscreen"
+- [ ] screenshot 区域传 bbox=(x,y,x+w,y+h) 给 ImageGrab.grab
+- [ ] screenshot 部分参数缺失降级全屏带 "fell back" 提示
+- [ ] vision LLM 调用使用 chat_with_image(prompt, image_path=str(filepath))
+- [ ] vision LLMError 降级为 "(vision unavailable: {error})"
+- [ ] llm_client=None 返回 "(llm_client not configured)"
+- [ ] NeonAgent 注册时注入 llm_client=self.llm
+
+---
+
 ## 🎓 进阶扩展（可选，学完上面再做）
 - [ ] 支持 Linux/macOS（写 .sh 启动脚本，对应打包工具）
 - [ ] 技能(Skills)插件系统 - 动态加载第三方工具包
 - [ ] 向量语义检索记忆 - 用embedding模型提升记忆召回准确率（需要ollama）
 - [ ] Token 计数与用量统计
-- [ ] 更多工具：Git 操作、数据库查询、HTTP请求调试
+- [x] 更多工具：Git 操作、HTTP请求调试（已实现 GitTool / HttpTool / TimeTool / MathTool / ComputerUseTool）
 - [ ] 多会话切换UI
 - [ ] 主题切换（除了霓虹青绿，支持其他配色）
 - [ ] 对话导出为Markdown
@@ -990,6 +1120,9 @@ self.registry.register(TodoTool(self.todo_list))
 | [cryptography 库文档](https://cryptography.io/) | AES-GCM 解密 |
 | [websocket-client 文档](https://websocket-client.readthedocs.io/) | WebSocket 客户端 |
 | [Tree of Thoughts 论文](https://arxiv.org/abs/2305.10601) | 思维树规划原理（阶段十一参考） |
+| [OpenAI Vision API 文档](https://platform.openai.com/docs/guides/vision) | 多模态图片理解参考（阶段十二） |
+| [Pillow (PIL) 文档](https://pillow.readthedocs.io/) | ImageGrab 截屏与 Image.open 图片处理（阶段十二） |
+| [ANSI 转义码参考](https://en.wikipedia.org/wiki/ANSI_escape_code) | truecolor 24-bit 颜色码格式（阶段十二缩略图渲染） |
 | Python 官方文档 - uuid 模块 | TodoList 短 id 生成参考 |
 | [Dependency Injection in Python](https://python-dependency-injector.ets.liniotech.com/) | 依赖注入模式深入（可选） |
 
@@ -1008,6 +1141,8 @@ self.registry.register(TodoTool(self.todo_list))
 10. **协议逆向能力是加分项** - 微信 iLink 协议没有官方文档，能逆向出来是核心能力
 11. **阶段十一是 Agent 升级关键** - ask_user / plan_tot / todo 三个能力让 AI 从"被动执行"变为"主动规划"，建议按顺序做（先 ask_user 解决意图，再 plan_tot 解决方案选择，最后 todo 解决进度追踪）
 12. **共享实例设计要理解透** - TodoList 在 NeonAgent 创建一次，AI 工具和 /todo 命令注入同一实例，这是"AI 与用户协同"的核心模式，理解后可应用到其他共享状态场景
+13. **阶段十二是多模态能力关键** - chat_with_image 让 AI 从"只读文本"升级为"能看见屏幕"，是对标 Codex computer use 的核心能力。建议先用一个支持 vision 的 model 测试（如 glm-4v / qwen-vl-plus / gpt-4o），理解多模态消息格式后再做缩略图渲染
+14. **三路独立降级是工程关键** - 截屏/vision/缩略图三者异常互不影响，这种"局部失败不拖全局"的设计在多步骤工具中非常重要，理解后可应用到其他涉及多个外部依赖的工具
 
 ---
 
@@ -1025,3 +1160,4 @@ self.registry.register(TodoTool(self.todo_list))
 | 阶段九：即时通讯平台接入 | 7-10天 | ⬜ 待开始 | |
 | 阶段十：打包分发与图形安装 | 3-4天 | ⬜ 待开始 | |
 | 阶段十一：AI 主动规划能力 | 4-6天 | ⬜ 待开始 | |
+| 阶段十二：Computer Vision 与终端缩略图特效 | 5-7天 | ⬜ 待开始 | |

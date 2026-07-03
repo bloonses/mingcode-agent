@@ -74,10 +74,33 @@ class LLMClient:
         # 7. fallback 到原始文本
         return raw_text[:500] or f"(empty body, status {response.status_code})"
 
+    def _sanitize_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """规范化 messages，修复各供应商（智谱 GLM code=1214 等）的格式要求。
+
+        规则：
+        - content 缺失或 None → ''（智谱不接受 null）
+        - tool 角色空 content → 填充默认值（智谱不接受空 tool 结果）
+        - assistant 带 tool_calls 时空 content → 保留 ''（合规）
+        - list 形式的 content（多模态 image_url）→ 原样保留，不规范化
+        """
+        sanitized = []
+        for msg in messages:
+            new_msg = dict(msg)
+            # 多模态 content 是 list，直接保留不规范化，避免破坏 image_url 结构
+            if isinstance(new_msg.get("content"), list):
+                sanitized.append(new_msg)
+                continue
+            if "content" not in new_msg or new_msg["content"] is None:
+                new_msg["content"] = ""
+            if new_msg["role"] == "tool" and not new_msg["content"]:
+                new_msg["content"] = "(no output)"
+            sanitized.append(new_msg)
+        return sanitized
+
     def _build_payload(self, messages: List[Dict[str, Any]], tools: Optional[List] = None, stream: bool = False) -> Dict[str, Any]:
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": self._sanitize_messages(messages),
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "stream": stream
@@ -105,6 +128,31 @@ class LLMClient:
                 }
             })
         return parsed
+
+    def chat_with_image(self, prompt: str, image_path: str, system: str = None) -> str:
+        """多模态调用：发送图片+提示词，返回文本描述。
+
+        不走 stream（vision 通常不需要流式）。LLMError 向上抛出，由调用方捕获降级。
+        """
+        import base64
+        from pathlib import Path
+
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            ],
+        })
+
+        result = self.chat(messages, stream=False)
+        return result.get("content") or ""
 
     def chat(self, messages: List[Dict[str, Any]], tools: Optional[List] = None, stream: bool = False) -> Any:
         url = f"{self.base_url}/chat/completions"

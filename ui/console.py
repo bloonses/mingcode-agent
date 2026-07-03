@@ -19,6 +19,13 @@ from .theme import (
     PULSE_DURATION
 )
 
+# 可选依赖，运行时检测（与 computer_use.py 一致）
+try:
+    from PIL import Image
+    pil_available = True
+except ImportError:
+    pil_available = False
+
 console = Console(
     force_terminal=True,
     color_system="truecolor",
@@ -54,7 +61,7 @@ def print_logo() -> None:
     big_logo = Text(MINGCODE_BIG, style=f"bold {NEON_TEAL}")
     console.print(big_logo)
     console.print()
-    version = Text("v1.0.8", style=style_text_muted)
+    version = Text("v1.0.9", style=style_text_muted)
     console.print(version, justify="center")
     console.print()
     console.print(Text("Welcome to MINGCODE - Your AI coding assistant.", style=style_text))
@@ -176,3 +183,34 @@ def print_thinking_spinner() -> Generator[Progress, None, None]:
 def get_prompt() -> Text:
     prompt = Text("> ", style=style_prompt)
     return prompt
+
+
+def print_screenshot_thumbnail(image_path: str, max_width: int = 80) -> None:
+    """用 ANSI truecolor 半块字符在终端渲染截图缩略图（codex 风格）。
+
+    半块字符 ▀ 一次显示两行像素：上像素做前景色，下像素做背景色。
+    渲染失败不抛异常，只打印提示行。
+    """
+    if not pil_available:
+        console.print("[thumbnail unavailable: Pillow not installed]", markup=False)
+        return
+    try:
+        img = Image.open(image_path).convert("RGB")
+        # 计算缩放：宽 = max_width，高 = max_width × (h/w) / 2（半块合并两行）
+        scale = max_width / img.width
+        new_w = max_width
+        new_h = max(1, int(img.height * scale / 2))
+        resized = img.resize((new_w, new_h * 2))
+        # 标题行
+        console.print(Text("SCREENSHOT THUMBNAIL", style=style_neon_teal))
+        # 双重循环渲染（用内置 print，因为 Rich 会把 ANSI 转义码当文本显示）
+        for y in range(0, resized.height, 2):
+            line = ""
+            for x in range(new_w):
+                upper = resized.getpixel((x, y))
+                lower = resized.getpixel((x, y + 1)) if y + 1 < resized.height else (0, 0, 0)
+                line += f"\x1b[38;2;{upper[0]};{upper[1]};{upper[2]}m\x1b[48;2;{lower[0]};{lower[1]};{lower[2]}m▀"
+            line += "\x1b[0m"
+            print(line)
+    except Exception as e:
+        console.print(f"[thumbnail error: {e}]", markup=False)

@@ -6,3 +6,6 @@ pygments
 qrcode
 websocket-client
 cryptography
+pyautogui
+Pillow
+pygetwindows

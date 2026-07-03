@@ -1,4 +1,4 @@
-# MINGCODE <img src="https://img.shields.io/badge/version-1.0.8-neon?style=flat-square&color=%2300ff88" alt="version"> <img src="https://img.shields.io/badge/python-3.8+-blue?style=flat-square" alt="python">
+# MINGCODE <img src="https://img.shields.io/badge/version-1.0.9-neon?style=flat-square&color=%2300ff88" alt="version"> <img src="https://img.shields.io/badge/python-3.8+-blue?style=flat-square" alt="python">
 
 > ⚡ 赛博朋克风格的终端 AI 编码助手，支持多模型供应商、工具调用、会话持久化、多平台接入
 
@@ -26,7 +26,7 @@
 
 ### 方式一：使用安装程序（推荐用户）
 
-1. 前往 [Releases](https://github.com/yourname/mingcode/releases) 下载最新的 `MINGCODE-Setup-1.0.8.exe`
+1. 前往 [Releases](https://github.com/yourname/mingcode/releases) 下载最新的 `MINGCODE-Setup-1.0.9.exe`
 2. 双击运行安装向导，默认勾选"Add to PATH"
 3. **打开一个新的终端窗口**，输入 `mingcode` 启动
 4. 首次运行输入 `/settings` 配置你的 LLM 供应商

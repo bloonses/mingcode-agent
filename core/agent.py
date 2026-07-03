@@ -14,6 +14,11 @@ from tools.subagent import SubAgentTool
 from tools.ask_user import AskUserTool
 from tools.plan_tot import PlanToTTool
 from tools.todo import TodoTool
+from tools.time_tool import TimeTool
+from tools.math_tool import MathTool
+from tools.http_tool import HttpTool
+from tools.git_tool import GitTool
+from tools.computer_use import ComputerUseTool
 from core.todo import TodoList
 from ui.console import (
     print_thinking_spinner,
@@ -56,6 +61,16 @@ class NeonAgent:
         self.registry.register(PlanToTTool(self.llm))
         # 待办清单：跨会话持久化，AI 与 /todo 命令共享同一实例
         self.registry.register(TodoTool(self.todo_list))
+        # 时间日期：获取当前时间/时区/格式化/时间差
+        self.registry.register(TimeTool())
+        # 精确数学：避免浮点误差，使用 decimal
+        self.registry.register(MathTool())
+        # HTTP 请求调试：GET/POST/PUT/DELETE
+        self.registry.register(HttpTool())
+        # Git 版本控制：status/diff/log/add/commit/branch（不含 push/force）
+        self.registry.register(GitTool())
+        # 桌面控制（模仿 Codex computer use）：截屏 + 鼠标键盘 + vision 分析
+        self.registry.register(ComputerUseTool(llm_client=self.llm))
 
     def _build_system_prompt_with_memory(self, user_input: str) -> str:
         base_prompt = self.memory.system_prompt or ""

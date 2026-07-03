@@ -258,10 +258,15 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
             console.print(f"[{NEON_TEAL}]Session loaded: {name}[/{NEON_TEAL}]")
             console.print()
             for msg in agent.memory.messages:
-                if msg['role'] == 'user':
-                    print_user_message(msg['content'])
-                elif msg['role'] == 'assistant':
-                    print_assistant_message(msg['content'])
+                role = msg.get('role')
+                content = msg.get('content')
+                if role == 'user':
+                    print_user_message(content or "")
+                elif role == 'assistant':
+                    if not content:
+                        continue
+                    print_assistant_message(content)
+                # system / tool 消息不回显
         else:
             console.print(f"[red]Session not found: {name}[/red]")
         return True
@@ -430,7 +435,7 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print(f"[{NEON_TEAL} bold]═══ MINGCODE Diagnostic ═══[/{NEON_TEAL} bold]")
         console.print()
         console.print("[bold]Environment[/bold]")
-        console.print(f"  Version:       1.0.8")
+        console.print(f"  Version:       1.0.9")
         console.print(f"  Python:       {sys.version.split()[0]}")
         console.print(f"  Platform:     {sys.platform}")
         console.print(f"  Frozen:       {getattr(sys, 'frozen', False)}")

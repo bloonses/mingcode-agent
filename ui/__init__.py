@@ -5,6 +5,6 @@ from .theme import (
     style_text, style_text_muted, style_prompt
 )
 from .console import (
-    console, print_logo, print_user_message, print_assistant_message,
+    print_logo, print_user_message, print_assistant_message,
     print_tool_call, print_tool_result, print_error, print_thinking_spinner, get_prompt
 )
