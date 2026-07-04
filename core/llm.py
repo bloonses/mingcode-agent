@@ -28,6 +28,9 @@ class LLMClient:
         self.temperature = llm_config.get("temperature", 0.7)
         self.max_tokens = llm_config.get("max_tokens", 4096)
         self.timeout = 60
+        # 推理模型思考深度（None / "low" / "medium" / "high"）
+        raw_effort = llm_config.get("reasoning_effort")
+        self.reasoning_effort = raw_effort if raw_effort in ("low", "medium", "high") else None
     
     @property
     def headers(self):
@@ -108,6 +111,8 @@ class LLMClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        if self.reasoning_effort:  # None 或空字符串都不传
+            payload["reasoning_effort"] = self.reasoning_effort
         return payload
 
     def _parse_tool_calls(self, raw_tool_calls: List[Dict]) -> List[Dict]:

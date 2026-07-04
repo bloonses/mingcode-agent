@@ -3,7 +3,7 @@ setlocal
 
 echo.
 echo ================================================================
-echo    MINGCODE v1.1.0 - Build Installer
+echo    MINGCODE v1.2.0 - Build Installer
 echo ================================================================
 echo.
 
@@ -90,9 +90,9 @@ if %errorlevel% equ 0 (
     echo   [SUCCESS] Build complete!
     echo.
     echo   Executable: %PROJECT_DIR%\dist\mingcode.exe
-    echo   Installer:  %PROJECT_DIR%\dist\MINGCODE-Setup-1.1.0.exe
+    echo   Installer:  %PROJECT_DIR%\dist\MINGCODE-Setup-1.2.0.exe
     echo.
-    echo   You can now distribute MINGCODE-Setup-1.1.0.exe to users.
+    echo   You can now distribute MINGCODE-Setup-1.2.0.exe to users.
     echo   They double-click it to install.
     echo.
     echo ================================================================

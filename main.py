@@ -172,6 +172,8 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print()
         console.print("[bold]Model & Config:[/bold]")
         console.print("  /model <name>   Switch to a different model")
+        console.print("  /reasoning [off|low|medium|high]  Set reasoning effort (thinking models only)")
+        console.print("  /cognitive [on|off]  Toggle cognitive controller (Plan-Reflect)")
         console.print("  /config         Show current configuration")
         console.print("  /settings       Configure LLM provider (interactive)")
         console.print("  /tools          List available tools")
@@ -392,6 +394,42 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         save_config(config)
         console.print(f"[{NEON_TEAL}]Switched to model: {agent.llm.model}[/{NEON_TEAL}]")
         return True
+    elif cmd == '/reasoning':
+        if not arg:
+            current = agent.llm.reasoning_effort or "off"
+            console.print(f"[{NEON_TEAL}]Reasoning effort: {current}[/{NEON_TEAL}]")
+            console.print(f"[{NEON_TEAL}]Options: off / low / medium / high[/{NEON_TEAL}]")
+            console.print(f"[{NEON_TEAL}]Note: 仅推理模型（如 o1/r1/qwen3-thinking）生效[/{NEON_TEAL}]")
+            return True
+        val = arg.strip().lower()
+        if val == "off":
+            val = None
+        if val not in (None, "low", "medium", "high"):
+            console.print(f"[{NEON_TEAL}]Invalid value. Use: off / low / medium / high[/{NEON_TEAL}]")
+            return True
+        agent.llm.reasoning_effort = val
+        config['llm']['reasoning_effort'] = val
+        save_config(config)
+        display = val or "off"
+        console.print(f"[{NEON_TEAL}]Reasoning effort set to: {display}[/{NEON_TEAL}]")
+        return True
+    elif cmd == '/cognitive':
+        if not arg:
+            enabled = config.get('cognitive', {}).get('enabled', True)
+            status = "on" if enabled else "off"
+            console.print(f"[{NEON_TEAL}]Cognitive controller: {status}[/{NEON_TEAL}]")
+            console.print(f"[{NEON_TEAL}]Options: on / off[/{NEON_TEAL}]")
+            return True
+        val = arg.strip().lower()
+        if val in ("on", "off"):
+            config['cognitive']['enabled'] = (val == "on")
+            save_config(config)
+            agent._cognitive_enabled = (val == "on")
+            agent._cognitive_controller = None
+            console.print(f"[{NEON_TEAL}]Cognitive controller: {val}[/{NEON_TEAL}]")
+        else:
+            console.print(f"[{NEON_TEAL}]Invalid value. Use: on / off[/{NEON_TEAL}]")
+        return True
     elif cmd == '/config':
         console.print()
         console.print(f"[{NEON_TEAL} bold]Configuration[/{NEON_TEAL} bold]")
@@ -402,6 +440,7 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print(f"  Model:       {agent.llm.model}")
         console.print(f"  Temperature: {llm_config.get('temperature', 0.7)}")
         console.print(f"  Max Tokens:  {llm_config.get('max_tokens', 4096)}")
+        console.print(f"  Reasoning:   {llm_config.get('reasoning_effort') or 'off'}")
         console.print(f"  Max History: {mem_config.get('max_history', 20)} turns")
         if agent.memory.current_session_name:
             console.print(f"  Session:     {agent.memory.current_session_name}")
@@ -435,7 +474,7 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print(f"[{NEON_TEAL} bold]═══ MINGCODE Diagnostic ═══[/{NEON_TEAL} bold]")
         console.print()
         console.print("[bold]Environment[/bold]")
-        console.print(f"  Version:       1.1.0")
+        console.print(f"  Version:       1.2.0")
         console.print(f"  Python:       {sys.version.split()[0]}")
         console.print(f"  Platform:     {sys.platform}")
         console.print(f"  Frozen:       {getattr(sys, 'frozen', False)}")
@@ -452,6 +491,7 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print(f"  API Key:      {'*' * 8}{api_key[-4:] if len(api_key) > 4 else '****'}")
         console.print(f"  Temperature:  {llm.get('temperature', 0.7)}")
         console.print(f"  Max Tokens:   {llm.get('max_tokens', 4096)}")
+        console.print(f"  Reasoning:    {agent.llm.reasoning_effort or 'off'}")
         console.print()
         console.print("[bold]Session[/bold]")
         console.print(f"  Messages:     {len(agent.memory.messages)}")
@@ -821,7 +861,16 @@ def run_settings_wizard(agent, config):
         max_tokens = int(tokens_str)
     except ValueError:
         max_tokens = 4096
-    
+    effort_str = Prompt.ask("  Reasoning effort (off/low/medium/high)",
+                            default=str(config['llm'].get('reasoning_effort') or "off"))
+    effort_str = effort_str.strip().lower()
+    if effort_str in ("off", "", "none"):
+        reasoning_effort = None
+    elif effort_str in ("low", "medium", "high"):
+        reasoning_effort = effort_str
+    else:
+        reasoning_effort = None  # 兜底
+
     console.print()
     console.print("[bold]Summary:[/bold]")
     console.print(f"  Provider:  {provider['name']}")
@@ -830,6 +879,7 @@ def run_settings_wizard(agent, config):
     console.print(f"  Model:     {model}")
     console.print(f"  Temp:      {temperature}")
     console.print(f"  MaxTokens: {max_tokens}")
+    console.print(f"  Reasoning: {reasoning_effort or 'off'}")
     console.print()
     
     confirm = Confirm.ask("Save these settings?", default=True)
@@ -839,13 +889,15 @@ def run_settings_wizard(agent, config):
         config['llm']['model'] = model
         config['llm']['temperature'] = temperature
         config['llm']['max_tokens'] = max_tokens
+        config['llm']['reasoning_effort'] = reasoning_effort
         save_config(config)
-        
+
         agent.llm.base_url = base_url
         agent.llm.api_key = api_key
         agent.llm.model = model
         agent.llm.temperature = temperature
         agent.llm.max_tokens = max_tokens
+        agent.llm.reasoning_effort = reasoning_effort
         
         agent.clear_memory()
         

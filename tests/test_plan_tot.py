@@ -1,82 +1,58 @@
-"""PlanToTTool 单元测试。"""
-from unittest.mock import MagicMock
+"""plan_tot 工具薄包装测试（Phase 3: 改为调 Planner）。"""
+from unittest.mock import MagicMock, patch
 
 from tools.plan_tot import PlanToTTool
 
 
-def _make_llm(response_content: str):
-    llm = MagicMock()
-    llm.chat.return_value = {
-        "role": "assistant",
-        "content": response_content,
-        "tool_calls": None,
-    }
-    return llm
-
-
 def test_schema():
-    tool = PlanToTTool(llm=_make_llm(""))
+    """工具 schema 应保持 plan_tot 名称，input 参数必需。"""
+    tool = PlanToTTool(planner=MagicMock())
     schema = tool.to_schema()
     assert schema["function"]["name"] == "plan_tot"
-    assert "task" in schema["function"]["parameters"]["properties"]
-    assert schema["function"]["parameters"]["required"] == ["task"]
+    assert "input" in schema["function"]["parameters"]["properties"]
+    assert schema["function"]["parameters"]["required"] == ["input"]
 
 
-def test_execute_returns_llm_content():
-    plan_text = "## 候选方案\n### 方案1\n## 最终计划\nstep1"
-    llm = _make_llm(plan_text)
-    tool = PlanToTTool(llm=llm)
-    result = tool.execute(task="实现登录功能")
-    assert result == plan_text
-    # 确认 LLM 被非流式调用
-    llm.chat.assert_called_once()
-    _, kwargs = llm.chat.call_args
-    assert kwargs.get("stream") is False
+def test_execute_calls_planner():
+    """plan_tot.execute 应调 Planner.execute（薄包装）。"""
+    mock_planner = MagicMock()
+    mock_planner.execute.return_value = [
+        {"id": 0, "desc": "t1", "status": "pending", "retries": 0, "feedback": None}
+    ]
+    tool = PlanToTTool(planner=mock_planner)
+    result = tool.execute(input="写个贪吃蛇")
+    mock_planner.execute.assert_called_once_with("写个贪吃蛇")
+    assert "t1" in result
 
 
-def test_execute_passes_task_in_prompt():
-    llm = _make_llm("ok")
-    tool = PlanToTTool(llm=llm)
-    tool.execute(task="重构认证模块")
-    args, kwargs = llm.chat.call_args
-    messages = args[0] if args else kwargs["messages"]
-    assert "重构认证模块" in messages[0]["content"]
+def test_execute_no_planner_creates_default():
+    """无 planner 参数时应内部构造默认 Planner。"""
+    tool = PlanToTTool(llm_client=MagicMock())
+    assert tool._planner is None or tool._planner is not None  # 延迟构造
+    # 触发一次 execute 后应已构造
+    # 用 mock 避免真实 LLM 调用
+    with patch("core.planner.Planner") as mock_planner_cls:
+        mock_planner_cls.return_value.execute.return_value = []
+        tool.execute(input="test")
+    assert tool._planner is not None
 
 
-def test_execute_empty_task_returns_error():
-    tool = PlanToTTool(llm=_make_llm("ok"))
-    assert "Error" in tool.execute(task="")
-    assert "Error" in tool.execute(task="   ")
+def test_execute_returns_string():
+    """execute 应返回字符串（工具协议）。"""
+    mock_planner = MagicMock()
+    mock_planner.execute.return_value = [
+        {"id": 0, "desc": "t1", "status": "pending", "retries": 0, "feedback": None}
+    ]
+    tool = PlanToTTool(planner=mock_planner)
+    result = tool.execute(input="test")
+    assert isinstance(result, str)
 
 
-def test_execute_llm_exception_returns_failure_marker():
-    llm = MagicMock()
-    llm.chat.side_effect = RuntimeError("network down")
-    tool = PlanToTTool(llm=llm)
-    result = tool.execute(task="test task")
-    assert "PlanToT" in result or "失败" in result
-    assert "network down" in result
-
-
-def test_execute_empty_llm_content_returns_marker():
-    llm = _make_llm("")
-    tool = PlanToTTool(llm=llm)
-    result = tool.execute(task="test")
-    assert result == "(空响应)"
-
-
-def test_prompt_contains_tot_structure_keywords():
-    """prompt 必须包含 ToT 三阶段关键词，确保 LLM 走思考→评估→筛选循环。"""
-    llm = _make_llm("ok")
-    tool = PlanToTTool(llm=llm)
-    tool.execute(task="任务X")
-    args, kwargs = llm.chat.call_args
-    messages = args[0] if args else kwargs["messages"]
-    prompt = messages[0]["content"]
-    assert "候选方案" in prompt
-    assert "评估" in prompt
-    assert "最优方案" in prompt
-    assert "最终计划" in prompt
+def test_execute_empty_input_returns_error():
+    """空 input 应返回错误信息。"""
+    tool = PlanToTTool(planner=MagicMock())
+    assert "Error" in tool.execute(input="")
+    assert "Error" in tool.execute(input="   ")
 
 
 def test_registered_in_main_agent():

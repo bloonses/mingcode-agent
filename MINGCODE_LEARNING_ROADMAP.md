@@ -1,4 +1,4 @@
-# 🚀 MINGCODE 保姆级复刻学习路线 v1.0.6
+# 🚀 MINGCODE 保姆级复刻学习路线 v1.0.8
 
 **总周期：10-12周 | 每日投入：1-2小时 | 目标：1:1完整复刻**
 
@@ -61,6 +61,12 @@
 | **串行 ReAct 循环** | 同一轮多个 tool_calls 改为 for 循环串行执行（替代 ThreadPoolExecutor），思考一步执行一步，每个工具结果出来后立即输出 |
 | **参数名冲突坑** | execute_tool(self, name, **kwargs) 的位置参数 name 会与工具参数 name="微信" 冲突，必须重命名为 tool_name |
 | **模块级 import 检测坑** | _check_optional("pyautogui") 只检测不导入，模块级名字未绑定会报 NameError，必须 if available: import xxx |
+| **推理模型思考深度参数** | LLMClient 加 reasoning_effort 属性（None/low/medium/high），_build_payload 仅在非 None 时注入字段到 payload 顶层，遵循 OpenAI o-series 标准 |
+| **状态机驱动认知框架** | CognitiveController 用 5 状态（CLASSIFY→PLANNING→EXECUTING→REFLECTING→DONE）调度 Plan-Execute-Reflect 三阶段，替代单一 ReAct 循环 |
+| **ToT 多候选评估筛选** | Planner 内嵌思维树：_generate_candidates 生成 N 候选 → _evaluate LLM 评分 → _select_best 选最高分，提升规划质量 |
+| **分级降级 L1/L2/L3** | 任务失败时按 retries 计数升级：L1 局部重试（回 EXECUTING）→ L2 整体重规划（回 PLANNING 带 feedback）→ L3 报错给用户（进 DONE） |
+| **Self-Ask 不确定性检测** | Executor 每轮 ReAct 后调 SelfAsker.check_uncertainty（~100 token LLM 判断），uncertain 时调 ask_user 工具向用户提问，回答塞回 memory 作为 clarification |
+| **延迟构造 + fallback** | NeonAgent.cognitive_controller property 首次访问才构造 CognitiveController；cognitive 异常时 fallback 走现有 ReAct，保证向后兼容 |
 
 ### 项目架构总览
 ```
@@ -984,6 +990,7 @@ self.registry.register(TodoTool(self.todo_list))
 | 高精度 vision prompt | ⭐⭐⭐⭐ | prompt 明确要求检测小元素（桌面图标 32x32、托盘图标 20x20），坐标带 w/h 尺寸 |
 | 截图用完即删 | ⭐⭐⭐⭐ | vision 分析完成后 os.remove 删除截图文件，避免磁盘累积临时文件 |
 | codex 自主执行 | ⭐⭐⭐ | _confirm 直接返回 True，移除所有写操作的用户确认提示，AI 自主操作 |
+| reasoning_effort 参数 | ⭐⭐⭐⭐ | OpenAI o-series 标准（low/medium/high），仅在非 None 时注入 payload，非推理模型设置后会报 400 |
 
 ### 🎯 练习任务
 1. **Task 1**：TDD 实现 LLMClient.chat_with_image
@@ -1086,6 +1093,29 @@ console.print("[thumbnail unavailable: Pillow not installed]", markup=False)
 | codex 自主执行 | 每个写操作都弹 `Confirm: ... [y/N]` 阻塞 AI 自主循环 | `_confirm` 直接返回 True，移除所有用户确认提示 | [tools/computer_use.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/computer_use.py#L230-L232) |
 | 空 choices 保护 | LLM 返回 `{"choices": []}` 时 `data.get("choices", [{}])[0]` 报 `list index out of range` | 改为 `(data.get("choices") or [{}])[0]`，非流式显式 `if not choices: raise LLMError` | [core/llm.py](file:///c:/Users/bloon/Downloads/neon_agent/core/llm.py) |
 
+### 🛠️ 工程改进（v1.1.1）
+v1.1.0 完成后追加的小功能：让用户能动态调整推理模型的思考深度。
+
+| 改进点 | 实现 | 涉及文件 |
+|--------|------|----------|
+| reasoning_effort 参数 | LLMClient 构造读 config，白名单过滤（仅 low/medium/high 通过，其他兜底 None）；_build_payload 仅在非 None 时注入 payload 顶层字段 | [core/llm.py](file:///c:/Users/bloon/Downloads/neon_agent/core/llm.py) |
+| /reasoning 斜杠命令 | 无 arg 显示当前值 + Options 提示；有 arg 设置并持久化（agent.llm.reasoning_effort + config + save_config） | [main.py](file:///c:/Users/bloon/Downloads/neon_agent/main.py) |
+| /settings wizard 步骤 | 在 max_tokens 询问后加 Prompt.ask 一步，off/none/空兜底 None | [main.py](file:///c:/Users/bloon/Downloads/neon_agent/main.py) |
+| /help /config /debug 输出 | 三个命令的输出都加 Reasoning 字段显示当前值 | [main.py](file:///c:/Users/bloon/Downloads/neon_agent/main.py) |
+
+**reasoning_effort 白名单过滤核心代码**：
+```python
+# 构造时白名单过滤（仅接受 low/medium/high，其他值兜底 None）
+raw_effort = llm_config.get("reasoning_effort")
+self.reasoning_effort = raw_effort if raw_effort in ("low", "medium", "high") else None
+
+# payload 仅在非 None 时注入（None 和空字符串都不传）
+if self.reasoning_effort:
+    payload["reasoning_effort"] = self.reasoning_effort
+```
+
+**关键设计决策**：选 None 而非字符串 "off" 作默认值，原因：(1) API payload 需要缺省而非传 off；(2) None 在 Python 里更自然表达未设置；(3) YAML 持久化为 null，加载时 config.get(...) 返回 None，循环无 bug。
+
 **串行 ReAct 循环核心代码**：
 ```python
 # 改进前（并行，结果顺序错乱）
@@ -1133,8 +1163,115 @@ if app_id:
     subprocess.Popen(f'start "" "shell:AppsFolder\\{app_id}"', shell=True)
 ```
 
+### 🛠️ 工程改进（v1.2.0）
+v1.2.0 是认知框架的重大升级：把单一 ReAct 循环改造为综合 4 种认知框架的状态机架构（Plan-and-Execute + Self-Reflection + Thinking/ToT + Self-Ask），让 Agent 能规划复杂任务、反思失败、自动重规划、向用户提问澄清。
+
+**4 阶段实现路线**：
+
+| Phase | 框架 | 核心类 | 新增测试 |
+|-------|------|--------|---------|
+| 1 | Plan-and-Execute | CognitiveController + Planner + Executor（复用 ReAct） | 16 |
+| 2 | Self-Reflection | Reflector 升级（stub → LLM 假成功检测 + L1/L2/L3 降级） | 12 |
+| 3 | Thinking (ToT) | Planner 升级（单次调用 → 多候选评估筛选）+ plan_tot 改薄包装 | 14 |
+| 4 | Self-Ask | SelfAsker 升级（stub → LLM 不确定性检测 + ask_user）+ Executor 默认开启 | 16 |
+
+**核心文件结构**：
+
+| 文件 | 责任 |
+|------|------|
+| [core/cognitive.py](file:///c:/Users/bloon/Downloads/neon_agent/core/cognitive.py) | CognitiveController 状态机：5 状态调度 + L1/L2/L3 降级 + fallback |
+| [core/planner.py](file:///c:/Users/bloon/Downloads/neon_agent/core/planner.py) | ToT 三步：_generate_candidates → _evaluate → _select_best → _parse_to_tasks |
+| [core/executor.py](file:///c:/Users/bloon/Downloads/neon_agent/core/executor.py) | ReAct 串行循环 + 不确定性检测触发 Self-Ask |
+| [core/reflector.py](file:///c:/Users/bloon/Downloads/neon_agent/core/reflector.py) | LLM 假成功检测（result 含 Error/Traceback 时识别 fail） |
+| [core/self_asker.py](file:///c:/Users/bloon/Downloads/neon_agent/core/self_asker.py) | LLM 不确定性检测 + 调 ask_user 工具 |
+
+**状态机核心代码**：
+```python
+class State(Enum):
+    CLASSIFY = "classify"      # LLM 判断 simple/complex
+    PLANNING = "planning"      # Planner ToT 生成任务列表
+    EXECUTING = "executing"   # Executor ReAct 执行单任务
+    REFLECTING = "reflecting" # Reflector 评估 + 分级降级
+    DONE = "done"
+
+def chat(self, user_input: str) -> str:
+    if self._classify(user_input) == "simple":
+        return self._fallback_to_react(user_input)  # 简单任务走 ReAct
+    self.task_list = self.planner.execute(user_input)
+    self.state = State.EXECUTING  # 初始规划后直接执行
+    while self.state != State.DONE:
+        if self.state == State.PLANNING:   self._step_replan()    # L2 重规划
+        elif self.state == State.EXECUTING:  self._step_execute()  # ReAct
+        elif self.state == State.REFLECTING: self._step_reflect()  # 评估+降级
+    return self._build_answer()
+```
+
+**L1/L2/L3 分级降级核心代码**：
+```python
+def _step_reflect(self):
+    task = self.task_list[self.current_task_idx]
+    verdict = self.reflector.evaluate(task)  # "success" 或 "fail: <reason>"
+    if verdict == "success":
+        task["status"] = "done"
+        self.current_task_idx += 1
+        self.state = State.DONE if self.current_task_idx >= len(self.task_list) else State.EXECUTING
+    else:
+        task["retries"] = task.get("retries", 0) + 1
+        task["feedback"] = verdict
+        if task["retries"] <= self.max_task_retries:
+            self.state = State.EXECUTING      # L1 局部重试
+        else:
+            self.replan_count += 1
+            if self.replan_count <= self.max_replans:
+                self.state = State.PLANNING   # L2 整体重规划（带 feedback）
+            else:
+                task["status"] = "failed"
+                self.state = State.DONE        # L3 报错给用户
+```
+
+**ToT 多候选评估筛选核心代码**：
+```python
+def execute(self, user_input, feedback=None):
+    candidates = self._generate_candidates(user_input, feedback)  # N 个候选
+    if not candidates:
+        return [self._make_task(0, user_input)]  # 兜底单任务
+    scored = self._evaluate(candidates, user_input)  # LLM 评分
+    best = self._select_best(scored)                  # 选最高分
+    return self._parse_to_tasks(best, user_input)     # 解析为任务列表
+
+def _split_candidates(self, content):
+    # 用 === Candidate N === 分隔
+    parts = re.split(r"===\s*Candidate\s*\d+\s*===\s*", content)
+    return [p.strip() for p in parts if p.strip()]
+```
+
+**Self-Ask 不确定性检测核心代码**：
+```python
+# Executor 每轮 ReAct 后触发
+if self.enable_uncertainty_check and self.self_asker:
+    last_obs = self.memory.get_last_message().get("content", "")
+    if last_obs:
+        verdict = self.self_asker.check_uncertainty(last_obs, task)
+        if verdict.startswith("uncertain"):
+            user_clarification = self.self_asker.ask(task["desc"], verdict)
+            self.memory.add_message("user", f"[Clarification] {user_clarification}")
+
+# SelfAsker.ask 调 ask_user 工具
+def ask(self, task_desc, uncertainty_reason):
+    question = uncertainty_reason.split(":", 1)[1].strip()
+    prompt = f"[Self-Ask] 任务「{task_desc}」需要澄清：{question}"
+    return self.registry.execute_tool("ask_user", prompt=prompt) or ""
+```
+
+**关键设计决策**：
+1. **LLM 分类触发**：simple 任务走 ReAct（快），complex 任务走 Plan-Execute-Reflect（全），避免简单任务过度规划
+2. **ToT 内嵌 Planner**：不单独建 ToT 模块，候选生成/评估/筛选作为 Planner 内部方法，对外接口不变
+3. **分级降级带 feedback**：L2 重规划时把所有失败任务的 feedback 喂给 Planner，避免重复失败
+4. **SelfAsker 失败不阻断**：LLM 异常、ask_user 异常都兜底返回，不阻塞 Executor 主循环
+5. **延迟构造 + fallback**：cognitive_controller property 首次访问才构造，异常时 fallback 走 ReAct，保证 v1.1.1 用户无感知升级
+
 ### ✅ 验收标准
-- [ ] 全部测试通过（118+ 个）
+- [ ] 全部测试通过（171 个）
 - [ ] chat_with_image 返回 LLM 响应的 content 字符串
 - [ ] chat_with_image 构造的 user content 是 list 形式含 text + image_url
 - [ ] chat_with_image 遇 LLMError 向上抛出（由调用方降级）
@@ -1167,9 +1304,11 @@ if app_id:
 - [ ] Subagent 工具结果流式回传（当前是聚合后一次性返回）
 - [ ] Subagent 并发度限制和优先级队列
 - [ ] 思维树多轮迭代 - PlanToTTool 支持多轮自反思优化（当前是单次调用）
+- [x] 综合认知框架 - 集成 Plan-and-Execute + Self-Reflection + Thinking/ToT + Self-Ask 四框架（v1.2.0 已实现）
 - [ ] 待办优先级和截止时间 - TodoList 加 priority / due_date 字段
 - [ ] AI 主动汇报进度 - 长任务执行中定期用 todo list 输出当前进度
 - [ ] ask_user 多渠道接入 - 微信/QQ 远程用户也能回答 AI 提问（当前只支持本地终端）
+- [ ] CognitiveController 手动模式切换 - /cognitive on|off 命令已支持，可加 /plan /reflect 等子命令细粒度控制
 
 ---
 
@@ -1195,11 +1334,16 @@ if app_id:
 | [Pillow (PIL) 文档](https://pillow.readthedocs.io/) | ImageGrab 截屏与 Image.open 图片处理（阶段十二） |
 | [ANSI 转义码参考](https://en.wikipedia.org/wiki/ANSI_escape_code) | truecolor 24-bit 颜色码格式（阶段十二缩略图渲染） |
 | Python 官方文档 - uuid 模块 | TodoList 短 id 生成参考 |
+| [Plan-and-Solve 论文](https://arxiv.org/abs/2305.04091) | Plan-and-Execute 框架原理（v1.2.0 认知框架参考） |
+| [Self-Refine 论文](https://arxiv.org/abs/2303.17651) | 自反思迭代改进原理（v1.2.0 Reflector 参考） |
+| [Self-Ask 论文](https://arxiv.org/abs/2210.03350) | 分解问题再检索的自问自答原理（v1.2.0 SelfAsker 参考） |
+| Python 官方文档 - enum 模块 | State 枚举实现状态机（v1.2.0 CognitiveController 参考） |
 | [Dependency Injection in Python](https://python-dependency-injector.ets.liniotech.com/) | 依赖注入模式深入（可选） |
 | [pyautogui 文档](https://pyautogui.readthedocs.io/) | 鼠标键盘自动化、屏幕定位（阶段十二 computer use） |
 | [PowerShell Get-StartApps](https://learn.microsoft.com/powershell/module/microsoft.powershell.management/) | Windows 开始菜单应用 AppID 反查（阶段十二 open_app） |
 | [OpenAI Computer Use Guide](https://platform.openai.com/docs/guides/computer-use) | Codex computer use 设计理念与最佳实践（阶段十二对标参考） |
 | [PyInstaller Hidden Imports](https://pyinstaller.org/en/stable/usage.html) | frozen 模式下可选依赖打包配置（阶段十二跨环境运行） |
+| [OpenAI Reasoning Models Guide](https://platform.openai.com/docs/guides/reasoning) | reasoning_effort 参数标准（low/medium/high，阶段十二 v1.1.1） |
 
 ---
 
@@ -1221,6 +1365,10 @@ if app_id:
 15. **工程改进是迭代必修课** - 阶段十二的 v1.1.0 工程改进都是真实使用中暴露的问题：串行 vs 并行、模块级 import 检测、参数名冲突、Windows start 命令解析等。建议按"工程改进"表格逐项对照实现，每改完一步跑 `python -m pytest tests/ -q --tb=short` 确认无回归。这些坑都很典型，遇到报错时先看错误信息（`NameError` / `got multiple values for argument` / `list index out of range`）就能定位到对应改进点
 16. **GUI 自动化优先用"截屏+点击"而非 shell** - ComputerUseTool 默认走 `screenshot → click/type → screenshot 验证 → 循环` 的工作流，而不是用大量 shell 命令。原因：(1) shell 启动应用难定位窗口位置；(2) 点击坐标可跨应用复用；(3) vision LLM 返回结构化坐标清单可直接喂给下一步。理解这个工作流后，可应用到 RPA、自动化测试、远程协助等场景
 17. **codex 自主执行的边界** - `_confirm` 直接返回 True 让 AI 自主循环不卡顿，但这也意味着 AI 可能误删文件、误点按钮。生产环境建议加白名单（仅允许 click/type，禁止 drag/key 系统组合键）+ 关键操作二次确认（如删除文件、发送消息）。本项目的安全键白名单 `_SAFE_KEYS` 是基础防护，可在此基础上扩展
+18. **reasoning_effort 是推理模型开关** - OpenAI o-series / DeepSeek-R1 / GLM-4.5 / Qwen3-Thinking 等推理模型支持 reasoning_effort 参数（low/medium/high）控制思考深度。本项目用 None 作默认值（不传该字段到 payload），切换到 low/medium/high 时才注入。注意：非推理模型设置后会报 400，由 LLMError 链捕获。建议先用一个推理模型测试（如 deepseek-reasoner），理解 payload 行为后再应用到生产
+19. **v1.2.0 认知框架是 Agent 升级关键** - 单一 ReAct 循环只能"走一步看一步"，复杂任务容易陷入局部最优。CognitiveController 状态机让 Agent 学会"先规划再执行→执行后反思→失败重规划→不确定提问"。建议按 4 阶段顺序实现（Plan-Execute → Self-Reflection → ToT → Self-Ask），每阶段完成后跑全套测试确认无回归。关键设计点：(1) LLM 分类触发避免简单任务过度规划；(2) ToT 内嵌 Planner 不破坏对外接口；(3) 分级降级带 feedback 避免重复失败；(4) SelfAsker 失败不阻断主循环
+20. **状态机比 if-else 链更适合复杂流程** - CognitiveController 用 State 枚举 + while 循环调度，比 if-else 链更清晰、更易扩展（加新状态只需加 enum 值 + 分支）。建议理解透状态机模式后，应用到其他需要多阶段处理的场景（如 IM Bot 消息处理流水线、长任务进度追踪等）
+21. **TDD 在多框架集成中尤其重要** - v1.2.0 集成 4 个认知框架，每个框架都有 stub → 真实实现 的升级过程。先写测试（RED）→ 实现最小代码（GREEN）→ 重构（REFACTOR）的节奏，能确保每一步行为可验证、回归可捕捉。建议严格按 plan 文档的 Task 顺序执行，每个 Task 完成后 commit 一次
 
 ---
 

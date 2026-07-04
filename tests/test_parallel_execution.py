@@ -59,7 +59,8 @@ def test_serial_tool_calls_run_sequentially(mock_llm, tmp_memory_file):
                 "temperature": 0.7, "max_tokens": 100},
         "memory": {"max_history": 5},
         "ui": {"theme": "neon", "animation": False, "show_thinking": False, "show_tools": False},
-        "tools": {}, "wechat": {}, "qq": {}
+        "tools": {}, "wechat": {}, "qq": {},
+        "cognitive": {"enabled": False},
     }
     agent = NeonAgent(config)
     # 用 mock_llm 替换真实 LLMClient

@@ -42,6 +42,38 @@ class NeonAgent:
         self.registry = ToolRegistry()
         self._register_tools()
         self.memory.build_system_prompt(self.registry.get_all_schemas())
+        self._cognitive_controller = None
+        self._cognitive_enabled = config.get("cognitive", {}).get("enabled", True)
+
+    @property
+    def cognitive_controller(self):
+        """延迟构造 CognitiveController。"""
+        if self._cognitive_controller is None and self._cognitive_enabled:
+            from core.cognitive import CognitiveController
+            from core.planner import Planner
+            from core.executor import Executor
+            from core.reflector import Reflector
+            from core.self_asker import SelfAsker
+
+            cog_config = self.config.get("cognitive", {})
+            self_asker = SelfAsker(self.llm, self.registry)
+            executor = Executor(
+                self.llm, self.memory, self.registry,
+                self_asker=self_asker,
+                enable_uncertainty_check=cog_config.get("self_ask", True),
+            )
+            self._cognitive_controller = CognitiveController(
+                llm_client=self.llm,
+                memory=self.memory,
+                tool_registry=self.registry,
+                planner=Planner(self.llm, tot_candidates=cog_config.get("tot_candidates", 3)),
+                executor=executor,
+                reflector=Reflector(self.llm),
+                self_asker=self_asker,
+                max_replans=cog_config.get("max_replans", 3),
+                max_task_retries=cog_config.get("max_task_retries", 2),
+            )
+        return self._cognitive_controller
 
     def _register_tools(self):
         self.registry.register(ShellTool())
@@ -56,7 +88,7 @@ class NeonAgent:
         # 行动前向用户提问以明确意图
         self.registry.register(AskUserTool())
         # 思维树规划：思考 → 评估 → 筛选循环后再行动
-        self.registry.register(PlanToTTool(self.llm))
+        self.registry.register(PlanToTTool(llm_client=self.llm))
         # 待办清单：跨会话持久化，AI 与 /todo 命令共享同一实例
         self.registry.register(TodoTool(self.todo_list))
         # 时间日期：获取当前时间/时区/格式化/时间差
@@ -76,6 +108,19 @@ class NeonAgent:
         return base_prompt + memory_section
 
     def chat(self, user_input: str) -> Generator[str, None, None]:
+        # Cognitive 分支：若启用则优先走 CognitiveController
+        # simple 任务返回 "[React fallback] " 前缀，落到下面流式 ReAct
+        # complex 任务返回最终结果，直接 yield
+        # 任何异常 fallback 走现有 ReAct
+        if self._cognitive_enabled:
+            try:
+                result = self.cognitive_controller.chat(user_input)
+                if not result.startswith("[React fallback] "):
+                    yield result
+                    return
+            except Exception:
+                pass  # 兜底：异常时 fallback 走现有 ReAct
+
         self.memory.add_message("user", user_input)
         
         original_system_prompt = self.memory.system_prompt
