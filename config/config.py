@@ -30,7 +30,8 @@ DEFAULT_CONFIG = {
         "api_key": "ollama",
         "model": "qwen2.5:7b",
         "temperature": 0.7,
-        "max_tokens": 4096
+        "max_tokens": 4096,
+        "reasoning_effort": None
     },
     "ui": {
         "theme": "neon",
@@ -71,6 +72,13 @@ DEFAULT_CONFIG = {
             "enabled": False,
             "auto_start": False
         }
+    },
+    "cognitive": {
+        "enabled": True,
+        "tot_candidates": 3,
+        "max_replans": 3,
+        "max_task_retries": 2,
+        "self_ask": False
     }
 }
 
@@ -87,6 +95,7 @@ llm:
   temperature: 0.7
   # 最大生成 token 数
   max_tokens: 4096
+  reasoning_effort: null  # 推理模型思考深度：null / low / medium / high（仅推理模型生效）
 
 # 用户界面配置
 ui:
