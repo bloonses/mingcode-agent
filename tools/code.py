@@ -1,44 +1,35 @@
-import sys
+"""Python 代码执行工具。"""
 import subprocess
+import sys
+import tempfile
 import os
-from .base import BaseTool
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 
-class PythonExecTool(BaseTool):
-    name = "python_exec"
-    description = "执行Python代码并返回stdout输出。代码在独立进程中运行。"
-    parameters = {
-        "type": "object",
-        "properties": {
-            "code": {
-                "type": "string",
-                "description": "要执行的Python代码"
-            },
-            "timeout": {
-                "type": "integer",
-                "description": "超时时间(秒)，默认10秒",
-                "default": 10
-            }
-        },
-        "required": ["code"]
-    }
+class PythonExecInput(BaseModel):
+    code: str = Field(description="Python code to execute")
 
-    def execute(self, code, timeout=10) -> str:
-        try:
-            result = subprocess.run(
-                [sys.executable, '-c', code],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                cwd=os.getcwd(),
-                timeout=timeout
-            )
-            output = result.stdout
-            if result.returncode != 0:
-                output = output + result.stderr
-            if len(output) > 4000:
-                output = output[:4000] + "[输出过长，已截断...]"
-            return output
-        except subprocess.TimeoutExpired:
-            return f"错误：执行超时（{timeout}秒）"
+
+@tool(args_schema=PythonExecInput)
+def python_exec(code: str) -> str:
+    """Execute Python code and return output."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
+        f.write(code)
+        temp_path = f.name
+    try:
+        result = subprocess.run(
+            [sys.executable, temp_path],
+            capture_output=True, text=True, timeout=10
+        )
+        output = result.stdout
+        if result.stderr:
+            output += f"\n[stderr] {result.stderr}"
+        return output or "(no output)"
+    except subprocess.TimeoutExpired:
+        return "Error: Python code timed out (10s)"
+    except Exception as e:
+        return f"Error: {e}"
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)

@@ -1,55 +1,59 @@
-"""SelfAsker - 不确定性检测 + Self-Ask。
-
-Phase 4: LLM 不确定性检测 + 调 ask_user 工具向用户提问。
-- check_uncertainty: ~100 token 判断 confident/uncertain
-- ask: 调 registry.execute_tool("ask_user", ...) 向用户提问
-"""
-from typing import Dict
+# core/self_asker.py 升级版
+"""SelfAsker - LLM 不确定性检测 + ask_user 工具。"""
+from langchain_core.messages import HumanMessage, SystemMessage
 
 
 class SelfAsker:
-    def __init__(self, llm_client, tool_registry):
-        self.llm = llm_client
-        self.registry = tool_registry
+    """SelfAsker - 检测不确定性，必要时向用户提问。"""
 
-    def check_uncertainty(self, last_observation: str, task: Dict) -> str:
-        """判断是否不确定。返回 'confident' 或 'uncertain: <reason>'。"""
+    def __init__(self, llm=None, tools=None):
+        self.llm = llm
+        self.tools = tools or []
+
+    def invoke(self, context: str) -> str:
+        """检测不确定性。
+
+        Returns:
+            "confident" 或 "uncertain: <reason>"
+        """
+        if self.llm is None:
+            return "confident"
         try:
-            # 截断过长 observation
-            obs = last_observation
-            if len(obs) > 500:
-                obs = obs[:500] + "...[truncated]"
+            prompt = f"""判断以下任务上下文是否存在不确定因素：
 
-            prompt = (
-                f"当前任务: {task.get('desc', '')}\n"
-                f"最新观察: {obs}\n\n"
-                f"基于当前进度，任务是否清晰可继续？\n"
-                f"- 如果观察显示任务正常进行（如工具返回有效结果、文件存在等），输出 'confident'\n"
-                f"- 如果观察显示有歧义、缺少信息、或需要用户确认（如文件不存在、参数模糊等），输出 'uncertain: <需要澄清的问题>'\n"
-                f"只输出 'confident' 或 'uncertain: <问题>'。"
-            )
-            response = self.llm.chat([
-                {"role": "user", "content": prompt}
-            ], stream=False)
-            content = (response.get("content") or "").strip()
-            if not content:
-                return "confident"
-            return content
+{context}
+
+判断标准:
+- CONFIDENT: 任务清晰、参数明确、无歧义
+- UNCERTAIN: <reason>: 缺少关键信息（如文件路径、参数值、目标对象等）
+
+只输出 CONFIDENT 或 UNCERTAIN: <reason>。"""
+            response = self.llm.invoke([
+                SystemMessage(content="你是不确定性检测助手。"),
+                HumanMessage(content=prompt),
+            ])
+            content = getattr(response, "content", "") or ""
+            content = content.strip()
+            if content.upper().startswith("UNCERTAIN"):
+                if ":" in content:
+                    reason = content.split(":", 1)[1].strip()
+                    return f"uncertain: {reason}"
+                return "uncertain: 需要用户澄清"
+            return "confident"
         except Exception:
-            # LLM 失败兜底 confident（不阻断）
             return "confident"
 
-    def ask(self, task_desc: str, uncertainty_reason: str) -> str:
-        """触发 Self-Ask：调 ask_user 工具向用户提问。"""
+    def ask(self, question: str) -> str:
+        """调 ask_user 工具向用户提问。"""
+        # 查找 ask_user 工具
+        for tool in self.tools:
+            if hasattr(tool, "name") and tool.name == "ask_user":
+                try:
+                    return tool.invoke({"question": question})
+                except Exception as e:
+                    return f"(提问失败: {e})"
+        # 兜底：直接 input
         try:
-            # 从 "uncertain: <reason>" 提取问题
-            question = uncertainty_reason
-            if ":" in uncertainty_reason:
-                question = uncertainty_reason.split(":", 1)[1].strip()
-
-            prompt = f"[Self-Ask] 任务「{task_desc}」需要澄清：{question}"
-            result = self.registry.execute_tool("ask_user", prompt=prompt)
-            return result if result else ""
-        except Exception:
-            # ask_user 失败不阻断
-            return ""
+            return input(f"\n[AI 问题] {question}\n> ")
+        except (EOFError, KeyboardInterrupt):
+            return "(用户取消)"

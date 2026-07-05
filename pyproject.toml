@@ -1,25 +1,43 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "mingcode"
-version = "1.2.0"
-description = "MINGCODE - Cyberpunk AI coding assistant"
-requires-python = ">=3.8"
+name = "mingcode-lc"
+version = "lc-v0.1.0"
+description = "MINGCODE-LC - LangChain version of cyberpunk AI coding assistant"
+requires-python = ">=3.10"
 dependencies = [
-    "requests>=2.28.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
     "rich>=13.0.0",
+    "pydantic>=2.0.0",
     "pyyaml>=6.0",
+    "requests>=2.28.0",
     "duckduckgo-search>=3.0.0",
     "pygments>=2.10.0",
     "qrcode>=7.3.1",
     "websocket-client>=1.6.0",
     "cryptography>=41.0.0",
+    "pyautogui>=0.9.54",
+    "Pillow>=9.0.0",
+    "pygetwindows>=0.0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
 ]
 
 [project.scripts]
-mingcode = "main:main"
+mingcode-lc = "main:main"
 
-[tool.setuptools]
-py-modules = []
+[tool.hatch.build.targets.wheel]
+packages = ["config", "core", "tools", "ui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

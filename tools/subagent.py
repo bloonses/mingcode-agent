@@ -1,36 +1,32 @@
-"""
-SubAgentTool - 让 agent 能派生子智能体。
-"""
-from typing import Optional
+# tools/subagent.py
+"""子智能体工具 - 派生独立 ReAct agent 处理子任务。"""
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
-from tools.base import BaseTool
-from core.llm import LLMClient
-from core.long_term_memory import LongTermMemory
+from langgraph.prebuilt import create_react_agent
+from core.llm import create_llm
+from config.config import load_config
 
 
-class SubAgentTool(BaseTool):
-    name = "task"
-    description = (
-        "派一个子智能体处理独立的子任务。子智能体有独立上下文，只返回最终答案。"
-        "适合：并行调研多个主题、独立子问题、需要长时间工具链的任务。"
-        "不要用于简单查询或单步工具调用。"
-    )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "task": {"type": "string", "description": "给子智能体的任务描述，要具体完整"},
-            "context": {"type": "string", "description": "可选的背景信息"}
-        },
-        "required": ["task"]
-    }
+class SubagentInput(BaseModel):
+    task: str = Field(description="Sub-task for the subagent to handle")
 
-    def __init__(self, llm: LLMClient, long_term_memory: LongTermMemory, depth: int = 2):
-        self._llm = llm
-        self._ltm = long_term_memory
-        self._depth = depth
 
-    def execute(self, task: str, context: str = "") -> str:
-        # 延迟导入避免循环依赖
-        from core.subagent import SubAgent
-        sub = SubAgent(self._llm, self._ltm, depth=self._depth)
-        return sub.run(task, context)
+@tool(args_schema=SubagentInput)
+def subagent(task: str) -> str:
+    """Dispatch a subagent to handle an independent sub-task with its own context."""
+    try:
+        # 延迟导入以避免循环依赖（tools/__init__ -> tools.subagent -> tools）
+        from tools import ALL_TOOLS
+        config = load_config()
+        llm = create_llm(config)
+        agent = create_react_agent(llm, ALL_TOOLS)
+        response = agent.invoke({"messages": [{"role": "user", "content": task}]})
+        messages = response.get("messages", [])
+        for msg in reversed(messages):
+            content = getattr(msg, "content", "") or ""
+            if content and not getattr(msg, "tool_calls", None):
+                return content
+        return "(subagent 无输出)"
+    except Exception as e:
+        return f"Error: {e}"

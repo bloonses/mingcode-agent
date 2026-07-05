@@ -1,80 +1,89 @@
-"""Reflector 测试（Phase 2: LLM 评估 + 假成功检测）。"""
-import pytest
-from unittest.mock import MagicMock, patch
+# tests/test_reflector.py
+"""Reflector 测试。"""
+from unittest.mock import MagicMock
+from core.reflector import Reflector
 
 
-def _make_reflector():
-    from core.reflector import Reflector
-    return Reflector(MagicMock())
+def test_reflector_success_when_done():
+    """status=done 应返回 success。"""
+    reflector = Reflector(llm=MagicMock())
+    task = {"id": 0, "desc": "t1", "status": "done", "result": "ok", "retries": 0, "feedback": None}
+    verdict = reflector.invoke(task)
+    assert verdict == "success"
 
 
-class TestReflectorEvaluation:
-    def test_done_status_with_ok_result_returns_success(self):
-        """status=done 且 LLM 判 ok 时返回 success。"""
-        reflector = _make_reflector()
-        with patch.object(reflector, '_llm_evaluate', return_value="ok"):
-            task = {"id": 0, "desc": "t1", "status": "done", "result": "all good"}
-            verdict = reflector.evaluate(task)
-        assert verdict == "success"
+def test_reflector_fail_when_failed():
+    """status=failed 应返回 fail:xxx。"""
+    reflector = Reflector(llm=MagicMock())
+    task = {"id": 0, "desc": "t1", "status": "failed", "result": "Error: timeout", "retries": 0, "feedback": None}
+    verdict = reflector.invoke(task)
+    assert verdict.startswith("fail")
 
-    def test_done_status_with_error_result_returns_fail(self):
-        """status=done 但 result 含 Error 时 _llm_evaluate 应返回 fail。"""
-        reflector = _make_reflector()
-        with patch.object(reflector.llm, 'chat', return_value={"content": "fail: 含 Traceback"}):
-            task = {"id": 0, "desc": "t1", "status": "done", "result": "Error: xxx"}
-            verdict = reflector.evaluate(task)
-        assert verdict.startswith("fail:")
 
-    def test_failed_status_returns_fail_with_reason(self):
-        """status=failed 时应返回 fail: <reason>（不调 LLM）。"""
-        reflector = _make_reflector()
-        task = {"id": 0, "desc": "t1", "status": "failed", "result": "Max iterations reached"}
-        verdict = reflector.evaluate(task)
-        assert verdict.startswith("fail:")
-        assert "Max iterations" in verdict
-        # 验证没调 LLM
-        reflector.llm.chat.assert_not_called()
+def test_reflector_fail_with_error_in_result():
+    """result 含 Error 应返回 fail。"""
+    reflector = Reflector(llm=MagicMock())
+    task = {"id": 0, "desc": "t1", "status": "done", "result": "Traceback: ...Error: something", "retries": 0, "feedback": None}
+    verdict = reflector.invoke(task)
+    assert verdict.startswith("fail")
 
-    def test_llm_evaluate_uses_task_desc_and_result(self):
-        """_llm_evaluate 应把 task desc 和 result 都传给 LLM。"""
-        reflector = _make_reflector()
-        with patch.object(reflector.llm, 'chat', return_value={"content": "ok"}) as mock_chat:
-            task = {"id": 0, "desc": "写 hello world", "status": "done", "result": "print('hello')"}
-            reflector._llm_evaluate(task)
-        # 验证 LLM 被调用
-        mock_chat.assert_called_once()
-        # 验证 prompt 含任务描述和结果
-        call_args = mock_chat.call_args
-        messages = call_args[0][0]
-        prompt_text = messages[0]["content"]
-        assert "写 hello world" in prompt_text
-        assert "print('hello')" in prompt_text
 
-    def test_llm_failure_falls_back_to_trust_status(self):
-        """LLM 评估失败时应兜底信任 task status（done→success）。"""
-        reflector = _make_reflector()
-        with patch.object(reflector.llm, 'chat', side_effect=Exception("network error")):
-            task = {"id": 0, "desc": "t1", "status": "done", "result": "ok"}
-            verdict = reflector.evaluate(task)
-        assert verdict == "success"  # done 兜底为 success
+def test_reflector_llm_not_called_when_none():
+    """llm=None 时不应调 LLM，直接返回 success。"""
+    reflector = Reflector(llm=None)
+    task = {"id": 0, "desc": "t1", "status": "done", "result": "ok", "retries": 0, "feedback": None}
+    verdict = reflector.invoke(task)
+    assert verdict == "success"
 
-    def test_llm_failure_with_failed_status_returns_fail(self):
-        """LLM 评估失败 + status=failed 时兜底返回 fail。"""
-        reflector = _make_reflector()
-        with patch.object(reflector.llm, 'chat', side_effect=Exception("network error")):
-            task = {"id": 0, "desc": "t1", "status": "failed", "result": "error"}
-            verdict = reflector.evaluate(task)
-        assert verdict.startswith("fail:")
 
-    def test_truncates_long_result(self):
-        """result 过长时应截断传给 LLM（避免 token 超限）。"""
-        reflector = _make_reflector()
-        long_result = "x" * 2000
-        with patch.object(reflector.llm, 'chat', return_value={"content": "ok"}) as mock_chat:
-            task = {"id": 0, "desc": "t1", "status": "done", "result": long_result}
-            reflector._llm_evaluate(task)
-        call_args = mock_chat.call_args
-        messages = call_args[0][0]
-        prompt_text = messages[0]["content"]
-        # 验证 result 被截断（< 1000 字符）
-        assert len(prompt_text) < 1500
+def test_reflector_llm_evaluates_apparent_success():
+    """status=done 且无错误关键词时应调 LLM 评估。"""
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = "SUCCESS"
+    mock_llm.invoke.return_value = mock_response
+    reflector = Reflector(llm=mock_llm)
+    task = {"id": 0, "desc": "t1", "status": "done", "result": "看起来完成了，但实际可能有 bug", "retries": 0, "feedback": None}
+    verdict = reflector.invoke(task)
+    assert verdict == "success"
+    mock_llm.invoke.assert_called_once()
+
+
+def test_reflector_llm_detects_apparent_failure():
+    """LLM 应能识别假成功。"""
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = "FAIL: result contains syntax error"
+    mock_llm.invoke.return_value = mock_response
+    reflector = Reflector(llm=mock_llm)
+    task = {"id": 0, "desc": "t1", "status": "done", "result": "代码已生成", "retries": 0, "feedback": None}
+    verdict = reflector.invoke(task)
+    assert verdict.startswith("fail")
+    assert "syntax error" in verdict
+
+
+def test_reflector_llm_exception_falls_back_to_success():
+    """LLM 异常应兜底为 success（避免阻塞流程）。"""
+    mock_llm = MagicMock()
+    mock_llm.invoke.side_effect = Exception("API error")
+    reflector = Reflector(llm=mock_llm)
+    task = {"id": 0, "desc": "t1", "status": "done", "result": "ok", "retries": 0, "feedback": None}
+    verdict = reflector.invoke(task)
+    assert verdict == "success"
+
+
+def test_reflector_truncates_long_result():
+    """result > 500 字符应截断。"""
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = "SUCCESS"
+    mock_llm.invoke.return_value = mock_response
+    reflector = Reflector(llm=mock_llm)
+    long_result = "x" * 1000
+    task = {"id": 0, "desc": "t1", "status": "done", "result": long_result, "retries": 0, "feedback": None}
+    reflector.invoke(task)
+    # 验证 LLM prompt 包含截断后的内容
+    call_args = mock_llm.invoke.call_args
+    messages = call_args[0][0] if call_args[0] else call_args[1].get("messages", [])
+    prompt_content = str(messages)
+    assert "x" * 1000 not in prompt_content

@@ -1,149 +1,123 @@
-"""Planner - 任务规划器（含 ToT 思维树）。
+# core/planner.py 升级版
+"""Planner - Phase 4 ToT 实现。
 
-Phase 3: ToT 多候选 → 评估 → 筛选最优 → 解析任务列表。
+ToT 流程:
+1. 生成 N 个候选方案（_generate_candidates）
+2. 评估每个候选的分数（_evaluate_candidate）
+3. 选分数最高的（_select_best）
 """
+import json
 import re
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
+from langchain_core.messages import HumanMessage, SystemMessage
 
 
 class Planner:
-    def __init__(self, llm_client, tot_candidates: int = 3):
-        self.llm = llm_client
+    """Planner - ToT 任务规划。"""
+
+    def __init__(self, llm, tot_candidates: int = 3):
+        self.llm = llm
         self.tot_candidates = tot_candidates
 
-    def execute(self, user_input: str, feedback: Optional[List[str]] = None) -> List[Dict]:
-        """生成任务列表（ToT 三步：候选 → 评估 → 筛选）。"""
+    def invoke(self, user_input: str, feedback: Optional[List[str]] = None) -> List[Dict]:
+        """生成任务列表 - ToT 流程。"""
         try:
+            # 1. 生成候选
             candidates = self._generate_candidates(user_input, feedback)
-            if not candidates:
-                # 兜底：返回单任务
-                return [self._make_task(0, user_input)]
-
-            scored = self._evaluate(candidates, user_input)
-            best = self._select_best(scored)
-            tasks = self._parse_to_tasks(best, user_input)
-
-            if not tasks:
-                # 解析失败兜底
-                return [self._make_task(0, user_input)]
-            return tasks
+            if len(candidates) <= 1:
+                # 兜底：只生成一个，直接返回
+                return candidates[0] if candidates else self._fallback_task(user_input)
+            # 2. 评分
+            scores = [self._evaluate_candidate(user_input, c) for c in candidates]
+            # 3. 选最优
+            return self._select_best(candidates, scores)
         except Exception:
-            # 任何异常兜底返回单任务
-            return [self._make_task(0, user_input)]
+            return self._fallback_task(user_input)
 
-    def _generate_candidates(self, user_input: str, feedback: Optional[List[str]]) -> List[str]:
-        """调 LLM 生成 N 个候选计划。"""
+    def _generate_candidates(self, user_input: str, feedback: Optional[List[str]]) -> List[List[Dict]]:
+        """生成 N 个候选方案。"""
         feedback_section = ""
         if feedback:
-            feedback_section = "\n\n上次执行失败的反馈：\n"
-            for i, fb in enumerate(feedback, 1):
-                feedback_section += f"{i}. {fb}\n"
-            feedback_section += "请基于反馈重新规划，避免重复失败。\n"
+            feedback_str = "\n".join(f"- {f}" for f in feedback if f)
+            feedback_section = f"\n\n之前失败反馈:\n{feedback_str}\n请避免重复错误。"
+        prompt = f"""把以下任务拆解为子任务列表：
 
-        prompt = (
-            f"用户需求: {user_input}{feedback_section}\n\n"
-            f"请生成 {self.tot_candidates} 个不同的执行计划候选。\n"
-            f"每个候选用 === Candidate N === 分隔，格式：\n"
-            f"=== Candidate 1 ===\n1. 步骤一\n2. 步骤二\n"
-            f"=== Candidate 2 ===\n1. 步骤一\n2. 步骤二\n"
-            f"...\n\n"
-            f"要求：\n"
-            f"- 每个候选思路不同（激进/保守/折中）\n"
-            f"- 每个候选 1-5 个步骤\n"
-            f"- 每个步骤可由 ReAct Agent 独立完成"
-        )
-        response = self.llm.chat([
-            {"role": "user", "content": prompt}
-        ], stream=False)
-        content = response.get("content", "")
-        return self._split_candidates(content)
+用户任务: {user_input}{feedback_section}
 
-    def _split_candidates(self, content: str) -> List[str]:
-        """把 LLM 输出按 === Candidate N === 分隔为候选列表。"""
-        if not content or not content.strip():
-            return []
-        # 用 === Candidate 分隔
-        parts = re.split(r"===\s*Candidate\s*\d+\s*===\s*", content)
-        # 第一项通常是空字符串（=== 前没内容）
-        candidates = [p.strip() for p in parts if p.strip()]
+输出 JSON 数组，每个元素格式:
+{{"id": 0, "desc": "任务描述", "status": "pending", "retries": 0, "feedback": null}}
+
+只输出 JSON，不要其他文字。"""
+        candidates = []
+        for i in range(self.tot_candidates):
+            try:
+                response = self.llm.invoke([
+                    SystemMessage(content=f"你是任务规划助手。生成方案 #{i+1}，尝试不同角度。"),
+                    HumanMessage(content=prompt),
+                ])
+                content = getattr(response, "content", "") or ""
+                tasks = self._parse_tasks(content, user_input)
+                candidates.append(tasks)
+            except Exception:
+                continue
         return candidates
 
-    def _evaluate(self, candidates: List[str], user_input: str) -> List[Dict]:
-        """调 LLM 评估每个候选（评分 + 理由）。"""
+    def _evaluate_candidate(self, user_input: str, candidate: List[Dict]) -> float:
+        """评估候选方案分数 0-1。"""
+        try:
+            candidate_str = json.dumps(candidate, ensure_ascii=False)
+            prompt = f"""评估以下任务规划方案的质量：
+
+用户任务: {user_input}
+方案: {candidate_str}
+
+评分标准（0-1）:
+- 完整性：是否覆盖所有必需步骤
+- 可执行性：步骤是否清晰可执行
+- 合理性：顺序和依赖是否合理
+
+只输出一个 0-1 的小数，不要其他文字。"""
+            response = self.llm.invoke([
+                SystemMessage(content="你是方案评估助手，输出 0-1 的分数。"),
+                HumanMessage(content=prompt),
+            ])
+            content = getattr(response, "content", "") or ""
+            content = content.strip()
+            # 提取数字
+            match = re.search(r"(\d+\.?\d*)", content)
+            if match:
+                score = float(match.group(1))
+                return max(0.0, min(1.0, score))
+            return 0.5
+        except Exception:
+            return 0.5
+
+    def _select_best(self, candidates: List[List[Dict]], scores: List[float]) -> List[Dict]:
+        """选分数最高的候选。"""
         if not candidates:
             return []
+        best_idx = max(range(len(candidates)), key=lambda i: scores[i] if i < len(scores) else 0)
+        return candidates[best_idx]
+
+    def _parse_tasks(self, content: str, user_input: str) -> List[Dict]:
+        """解析 LLM 输出为任务列表。"""
+        content = content.strip()
+        if content.startswith("```"):
+            lines = content.split("\n")
+            content = "\n".join(l for l in lines if not l.startswith("```"))
         try:
-            candidates_text = ""
-            for i, c in enumerate(candidates, 1):
-                candidates_text += f"Candidate {i}:\n{c}\n\n"
+            tasks = json.loads(content)
+            if not isinstance(tasks, list):
+                return self._fallback_task(user_input)
+            for i, t in enumerate(tasks):
+                t.setdefault("id", i)
+                t.setdefault("status", "pending")
+                t.setdefault("retries", 0)
+                t.setdefault("feedback", None)
+            return tasks
+        except (json.JSONDecodeError, ValueError):
+            return self._fallback_task(user_input)
 
-            prompt = (
-                f"用户需求: {user_input}\n\n"
-                f"候选计划:\n{candidates_text}\n"
-                f"评估每个候选的质量（1-10 分），考虑：\n"
-                f"- 任务拆分合理性\n"
-                f"- 步骤可执行性\n"
-                f"- 风险与复杂度\n\n"
-                f"按以下格式输出：\n"
-                f"Candidate 1: score=N\n"
-                f"Candidate 2: score=N\n"
-                f"..."
-            )
-            response = self.llm.chat([
-                {"role": "user", "content": prompt}
-            ], stream=False)
-            content = response.get("content", "")
-            return self._parse_evaluations(content, candidates)
-        except Exception:
-            # LLM 失败兜底：全部给默认分 0
-            return [{"plan": c, "score": 0} for c in candidates]
-
-    def _parse_evaluations(self, content: str, candidates: List[str]) -> List[Dict]:
-        """解析 LLM 评估输出为 [{plan, score}]。"""
-        scored = []
-        for i, plan in enumerate(candidates, 1):
-            # 找 "Candidate N: score=M" 模式
-            pattern = rf"Candidate\s*{i}\s*:\s*score\s*=\s*(\d+)"
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match:
-                score = int(match.group(1))
-            else:
-                score = 0  # 解析失败默认 0
-            scored.append({"plan": plan, "score": score})
-        return scored
-
-    def _select_best(self, scored: List[Dict]) -> str:
-        """选评分最高的候选。平分时选第一个。"""
-        if not scored:
-            return ""
-        return max(scored, key=lambda x: x["score"])["plan"]
-
-    def _parse_to_tasks(self, plan: str, original_input: str) -> List[Dict]:
-        """把计划文本解析为任务列表。"""
-        if not plan or not plan.strip():
-            return []
-        tasks = []
-        lines = plan.strip().split("\n")
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            # 解析 "1. 任务描述" 或 "- 任务描述" 或 "* 任务描述"
-            desc = line
-            for prefix in ["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.", "10.", "- ", "* "]:
-                if line.startswith(prefix + " "):
-                    desc = line[len(prefix):].strip()
-                    break
-            if desc:
-                tasks.append(self._make_task(len(tasks), desc))
-        return tasks
-
-    def _make_task(self, task_id: int, desc: str) -> Dict:
-        """构造任务 dict。"""
-        return {
-            "id": task_id,
-            "desc": desc,
-            "status": "pending",
-            "retries": 0,
-            "feedback": None,
-        }
+    def _fallback_task(self, user_input: str) -> List[Dict]:
+        """兜底：单个任务。"""
+        return [{"id": 0, "desc": user_input, "status": "pending", "retries": 0, "feedback": None}]

@@ -1,263 +1,109 @@
-import json
-from typing import Generator, Dict, Any, Optional, List
+"""LangChainAgent - NeonAgent 的 LangChain 等价实现。"""
+from typing import Generator, Dict, Any, List, Optional
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent as create_react_agent_langgraph
+from langchain_core.messages import HumanMessage
 
-from core.llm import LLMClient
+from core.llm import create_llm
 from core.memory import ConversationMemory
-from core.long_term_memory import LongTermMemory
-from tools.base import ToolRegistry
-from tools.shell import ShellTool
-from tools.files import FileReadTool, FileWriteTool, FileEditTool
-from tools.code import PythonExecTool
-from tools.search import WebSearchTool, WebFetchTool
-from tools.subagent import SubAgentTool
-from tools.ask_user import AskUserTool
-from tools.plan_tot import PlanToTTool
-from tools.todo import TodoTool
-from tools.time_tool import TimeTool
-from tools.math_tool import MathTool
-from tools.http_tool import HttpTool
-from tools.git_tool import GitTool
-from tools.computer_use import ComputerUseTool
-from core.todo import TodoList
-from ui.console import (
-    print_thinking_spinner,
-    print_tool_call,
-    print_tool_result,
-    print_error,
-    print_assistant_message
-)
-from config.config import load_config
+from tools import ALL_TOOLS
+from ui.console import print_assistant_message, print_tool_call, print_tool_result, print_error
+from ui.callbacks import RichStreamHandler
 
 
-class NeonAgent:
-    def __init__(self, config: Dict[str, Any]):
+class LangChainAgent:
+    """LangChain 版 Agent - 对外 Generator[str] 接口与 NeonAgent 一致。"""
+
+    def __init__(self, config: Dict[str, Any], llm: Optional[ChatOpenAI] = None):
         self.config = config
-        self.llm = LLMClient(config)
-        self.memory = ConversationMemory(
-            max_history=config['memory']['max_history']
-        )
-        self.long_term_memory = LongTermMemory()
-        self.todo_list = TodoList()
-        self.todo_list.load()
-        self.registry = ToolRegistry()
-        self._register_tools()
-        self.memory.build_system_prompt(self.registry.get_all_schemas())
-        self._cognitive_controller = None
-        self._cognitive_enabled = config.get("cognitive", {}).get("enabled", True)
+        self.llm = llm or create_llm(config)
+        self.tools = list(ALL_TOOLS)
+        self.memory = ConversationMemory(max_history=config.get("memory", {}).get("max_history", 50))
+        self.cognitive_enabled = config.get("cognitive", {}).get("enabled", False)
+        self._react_agent = None
+        self._cognitive_graph = None
 
     @property
-    def cognitive_controller(self):
-        """延迟构造 CognitiveController。"""
-        if self._cognitive_controller is None and self._cognitive_enabled:
-            from core.cognitive import CognitiveController
+    def react_agent(self):
+        """延迟构造 ReAct agent（LangGraph 版）。"""
+        if self._react_agent is None:
+            self._react_agent = create_react_agent_langgraph(self.llm, self.tools)
+        return self._react_agent
+
+    @property
+    def cognitive_graph(self):
+        """延迟构造 cognitive graph。"""
+        if self._cognitive_graph is None and self.cognitive_enabled:
+            from core.cognitive_graph import build_cognitive_graph, _initial_state
             from core.planner import Planner
             from core.executor import Executor
             from core.reflector import Reflector
             from core.self_asker import SelfAsker
 
             cog_config = self.config.get("cognitive", {})
-            self_asker = SelfAsker(self.llm, self.registry)
-            executor = Executor(
-                self.llm, self.memory, self.registry,
-                self_asker=self_asker,
-                enable_uncertainty_check=cog_config.get("self_ask", True),
-            )
-            self._cognitive_controller = CognitiveController(
-                llm_client=self.llm,
-                memory=self.memory,
-                tool_registry=self.registry,
-                planner=Planner(self.llm, tot_candidates=cog_config.get("tot_candidates", 3)),
+            planner = Planner(self.llm, tot_candidates=cog_config.get("tot_candidates", 3))
+            executor = Executor(react_agent=self.react_agent, llm=self.llm, tools=self.tools)
+            reflector = Reflector(self.llm)
+            # self_asker 当前不传给 build_cognitive_graph，但保留构造以备 Phase 4
+            _ = SelfAsker(self.llm, self.tools)
+            self._cognitive_graph = build_cognitive_graph(
+                planner=planner,
                 executor=executor,
-                reflector=Reflector(self.llm),
-                self_asker=self_asker,
-                max_replans=cog_config.get("max_replans", 3),
-                max_task_retries=cog_config.get("max_task_retries", 2),
+                reflector=reflector,
             )
-        return self._cognitive_controller
-
-    def _register_tools(self):
-        self.registry.register(ShellTool())
-        self.registry.register(FileReadTool())
-        self.registry.register(FileWriteTool())
-        self.registry.register(FileEditTool())
-        self.registry.register(PythonExecTool())
-        self.registry.register(WebSearchTool())
-        self.registry.register(WebFetchTool())
-        # 主 agent 的 subagent 工具，depth=2（可再递归 2 层）
-        self.registry.register(SubAgentTool(self.llm, self.long_term_memory, depth=2))
-        # 行动前向用户提问以明确意图
-        self.registry.register(AskUserTool())
-        # 思维树规划：思考 → 评估 → 筛选循环后再行动
-        self.registry.register(PlanToTTool(llm_client=self.llm))
-        # 待办清单：跨会话持久化，AI 与 /todo 命令共享同一实例
-        self.registry.register(TodoTool(self.todo_list))
-        # 时间日期：获取当前时间/时区/格式化/时间差
-        self.registry.register(TimeTool())
-        # 精确数学：避免浮点误差，使用 decimal
-        self.registry.register(MathTool())
-        # HTTP 请求调试：GET/POST/PUT/DELETE
-        self.registry.register(HttpTool())
-        # Git 版本控制：status/diff/log/add/commit/branch（不含 push/force）
-        self.registry.register(GitTool())
-        # 桌面控制（模仿 Codex computer use）：截屏 + 鼠标键盘 + vision 分析
-        self.registry.register(ComputerUseTool(llm_client=self.llm))
-
-    def _build_system_prompt_with_memory(self, user_input: str) -> str:
-        base_prompt = self.memory.system_prompt or ""
-        memory_section = self.long_term_memory.format_for_prompt(user_input)
-        return base_prompt + memory_section
+            self._cognitive_initial_state = _initial_state
+        return self._cognitive_graph
 
     def chat(self, user_input: str) -> Generator[str, None, None]:
-        # Cognitive 分支：若启用则优先走 CognitiveController
-        # simple 任务返回 "[React fallback] " 前缀，落到下面流式 ReAct
-        # complex 任务返回最终结果，直接 yield
-        # 任何异常 fallback 走现有 ReAct
-        if self._cognitive_enabled:
+        """主入口 - cognitive 启用走 LangGraph，否则走 ReAct。"""
+        if self.cognitive_enabled:
             try:
-                result = self.cognitive_controller.chat(user_input)
-                if not result.startswith("[React fallback] "):
-                    yield result
-                    return
-            except Exception:
-                pass  # 兜底：异常时 fallback 走现有 ReAct
+                # 访问 cognitive_graph 触发延迟构造（同时设置 _cognitive_initial_state）
+                graph = self.cognitive_graph
+                initial_state = self._cognitive_initial_state(
+                    user_input,
+                    max_task_retries=self.config.get("cognitive", {}).get("max_task_retries", 2),
+                    max_replans=self.config.get("cognitive", {}).get("max_replans", 3),
+                )
+                result = graph.invoke(initial_state)
+                if result.get("verdict") == "simple":
+                    # simple fallback 到 ReAct
+                    yield from self._run_react(user_input)
+                else:
+                    yield result.get("final_answer", "")
+                return
+            except Exception as e:
+                print_error(f"认知框架异常，回退到 ReAct: {e}")
 
-        self.memory.add_message("user", user_input)
-        
-        original_system_prompt = self.memory.system_prompt
-        self.memory.system_prompt = self._build_system_prompt_with_memory(user_input)
-        
-        max_iterations = 25
-        last_error: Optional[str] = None
-        last_error_tool: Optional[str] = None
+        yield from self._run_react(user_input)
 
+    def _run_react(self, user_input: str) -> Generator[str, None, None]:
+        """运行 ReAct agent，流式 yield 响应。"""
         try:
-            for iteration in range(max_iterations):
-                try:
-                    with print_thinking_spinner():
-                        stream_response = self.llm.chat(
-                            messages=self.memory.get_messages(),
-                            tools=self.registry.get_all_schemas(),
-                            stream=True
-                        )
-
-                    full_response = ""
-                    for chunk in stream_response:
-                        full_response += chunk
-                        yield chunk
-
-                    final_message = stream_response.final_message
-                    tool_calls = self._parse_tool_calls(final_message)
-
-                    if not tool_calls:
-                        self.memory.add_message("assistant", final_message.get("content") or "")
-                        break
-
-                    assistant_kwargs = {}
-                    if tool_calls:
-                        assistant_kwargs["tool_calls"] = [
-                            {
-                                "id": tc["id"],
-                                "type": tc["type"],
-                                "function": {
-                                    "name": tc["function"]["name"],
-                                    "arguments": json.dumps(tc["function"]["arguments"], ensure_ascii=False)
-                                    if isinstance(tc["function"]["arguments"], dict)
-                                    else tc["function"]["arguments"]
-                                }
-                            }
-                            for tc in tool_calls
-                        ]
-                    self.memory.add_message("assistant", final_message.get("content") or "", **assistant_kwargs)
-
-                    # 解析参数 + 打印 tool_call（顺序执行，快）
-                    parsed_calls: List[Dict[str, Any]] = []
-                    for tool_call in tool_calls:
-                        call_id = tool_call["id"]
-                        func = tool_call["function"]
-                        tool_name = func["name"]
-                        arguments = func["arguments"]
-
-                        if isinstance(arguments, str):
-                            try:
-                                arguments = json.loads(arguments)
-                            except json.JSONDecodeError as e:
-                                error_msg = f"工具参数解析失败: {str(e)}"
-                                print_error(error_msg)
-                                self.long_term_memory.auto_learn_from_error(
-                                    f"JSON解析错误 for {tool_name}",
-                                    "确保arguments是合法JSON，不要有多余注释或尾逗号"
-                                )
-                                arguments = {"_raw": arguments}
-
-                        print_tool_call(tool_name, arguments)
-                        parsed_calls.append({
-                            "call_id": call_id,
-                            "tool_name": tool_name,
-                            "arguments": arguments,
-                        })
-
-                    # 串行执行并处理（思考一步执行一步：每个工具执行完立即输出结果）
-                    def _exec_one(pc):
-                        cid = pc["call_id"]
-                        tn = pc["tool_name"]
-                        ag = pc["arguments"]
-                        try:
-                            res = self.registry.execute_tool(tn, **ag)
-                            return cid, tn, ag, res, None
-                        except Exception as e:
-                            return cid, tn, ag, None, str(e)
-
-                    for pc in parsed_calls:
-                        call_id, tool_name, arguments, result, error = _exec_one(pc)
-                        if error is not None:
-                            result = f"工具执行错误: {error}"
-                            last_error = error
-                            last_error_tool = tool_name
-                            err_str = error
-                            if "chcp" in err_str or "编码" in err_str or "乱码" in err_str or "gbk" in err_str.lower() or "codec" in err_str.lower():
-                                self.long_term_memory.auto_learn_from_error(
-                                    "Windows cmd编码问题/中文乱码",
-                                    "执行命令前先运行chcp 65001切换到UTF-8编码，或者只输出ASCII字符"
-                                )
-                            elif "Permission denied" in err_str or "权限" in err_str:
-                                self.long_term_memory.auto_learn_from_error(
-                                    "权限错误",
-                                    "系统目录(如Program Files)写入需要管理员权限，优先写入用户目录或%APPDATA%"
-                                )
-                            elif "not found" in err_str.lower() or "无法识别" in err_str or "不是内部" in err_str:
-                                pass
-                        else:
-                            if last_error_tool == tool_name and last_error:
-                                self.long_term_memory.auto_learn_success(
-                                    f"解决 {last_error[:50]}",
-                                    f"使用 {tool_name} 成功，参数: {str(arguments)[:100]}"
-                                )
-                                last_error = None
-                                last_error_tool = None
-
-                        print_tool_result(result)
-                        self.memory.add_message("tool", result, tool_call_id=call_id)
-
-                except Exception as e:
-                    err_str = str(e)
-                    print_error(f"发生错误: {err_str}")
-                    if "Connection refused" in err_str or "无法连接" in err_str or "ConnectionError" in err_str:
-                        self.long_term_memory.auto_learn_from_error(
-                            "LLM连接失败",
-                            "检查LLM服务是否启动，base_url是否正确；默认配置指向localhost:11434(Ollama)，需要运行/settings配置云服务商或启动Ollama"
-                        )
-                    break
-            else:
-                print_error("达到最大迭代次数，已终止")
-        finally:
-            self.memory.system_prompt = original_system_prompt
-
-    def remember(self, content: str, memory_type: str = "preference") -> str:
-        return self.long_term_memory.add(content, memory_type=memory_type)
-
-    def _parse_tool_calls(self, response: Dict[str, Any]) -> Optional[list]:
-        return response.get("tool_calls")
+            for event in self.react_agent.stream(
+                {"messages": [HumanMessage(content=user_input)]},
+                stream_mode="values",
+            ):
+                if "messages" in event and event["messages"]:
+                    last_msg = event["messages"][-1]
+                    content = getattr(last_msg, "content", "")
+                    if content and isinstance(content, str):
+                        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                            for tc in last_msg.tool_calls:
+                                print_tool_call(tc.get("name", ""), tc.get("args", {}))
+                        elif content.strip():
+                            yield content
+        except Exception as e:
+            yield f"Error: {e}"
 
     def clear_memory(self):
+        """清空对话历史。"""
         self.memory.clear()
-        self.memory.build_system_prompt(self.registry.get_all_schemas())
+
+    def save_session(self, name: str):
+        """保存会话。"""
+        self.memory.save(name)
+
+    def load_session(self, name: str):
+        """加载会话。"""
+        self.memory.load(name)

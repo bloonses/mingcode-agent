@@ -1,47 +1,26 @@
-"""plan_tot 工具 - 调用 Planner 薄包装（Phase 3 DRY）。
+# tools/plan_tot.py
+"""ToT 规划工具 - 调 Planner 生成任务列表。"""
+import json
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
-Phase 1/2: 内含 ToT 逻辑
-Phase 3: 改为调用 core.planner.Planner.execute，DRY
-"""
-from .base import BaseTool
+from core.planner import Planner
+from core.llm import create_llm
+from config.config import load_config
 
 
-class PlanToTTool(BaseTool):
-    name = "plan_tot"
-    description = (
-        "使用思维树（ToT）生成任务计划。生成多个候选计划，评估后选最优。"
-        "输入用户需求，返回任务列表。"
-    )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "input": {
-                "type": "string",
-                "description": "用户需求描述"
-            }
-        },
-        "required": ["input"]
-    }
+class PlanToTInput(BaseModel):
+    task: str = Field(description="Complex task to plan")
 
-    def __init__(self, planner=None, llm_client=None):
-        """planner 可注入；不注入时用 llm_client 构造默认 Planner（延迟构造）。"""
-        self._planner = planner
-        self._llm_client = llm_client
 
-    def execute(self, **kwargs) -> str:
-        input_text = (kwargs.get("input") or "").strip()
-        if not input_text:
-            return "Error: input is required"
-
-        planner = self._get_planner()
-        tasks = planner.execute(input_text)
-        return str(tasks)
-
-    def _get_planner(self):
-        """延迟构造 Planner（避免循环依赖）。"""
-        if self._planner is None:
-            from core.planner import Planner
-            if self._llm_client is None:
-                raise RuntimeError("planner or llm_client required")
-            self._planner = Planner(self._llm_client)
-        return self._planner
+@tool(args_schema=PlanToTInput)
+def plan_tot(task: str) -> str:
+    """Use Tree of Thoughts to plan a complex task into subtasks."""
+    try:
+        config = load_config()
+        llm = create_llm(config)
+        planner = Planner(llm, tot_candidates=config.get("cognitive", {}).get("tot_candidates", 3))
+        tasks = planner.invoke(task)
+        return json.dumps(tasks, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"Error: {e}"
