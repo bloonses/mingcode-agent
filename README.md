@@ -1,4 +1,4 @@
-# MINGCODE-LC <img src="https://img.shields.io/badge/version-lc--v0.1.0-neon?style=flat-square&color=%2300ff88" alt="version"> <img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square" alt="python"> <img src="https://img.shields.io/badge/stack-LangChain%20%2B%20LangGraph-9cf?style=flat-square" alt="stack">
+# MINGCODE-LC <img src="https://img.shields.io/badge/version-0.1.0%2Blc-neon?style=flat-square&color=%2300ff88" alt="version"> <img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square" alt="python"> <img src="https://img.shields.io/badge/stack-LangChain%20%2B%20LangGraph-9cf?style=flat-square" alt="stack">
 
 > ⚡ MINGCODE 的 LangChain 版本，用 LangGraph StateGraph 重写认知框架
 
