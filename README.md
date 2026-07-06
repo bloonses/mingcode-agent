@@ -1,8 +1,8 @@
-# MINGCODE <img src="https://img.shields.io/badge/version-1.2.0-neon?style=flat-square&color=%2300ff88" alt="version"> <img src="https://img.shields.io/badge/python-3.8+-blue?style=flat-square" alt="python"> <img src="https://img.shields.io/badge/tests-174-passing-neon?style=flat-square&color=%2300ff88" alt="tests"> <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
+# MINGCODE <img src="https://img.shields.io/badge/version-1.4.0-neon?style=flat-square&color=%2300ff88" alt="version"> <img src="https://img.shields.io/badge/python-3.8+-blue?style=flat-square" alt="python"> <img src="https://img.shields.io/badge/tests-261-passing-neon?style=flat-square&color=%2300ff88" alt="tests"> <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
 
-> ⚡ 赛博朋克风格的终端 AI 编码助手，综合 4 种认知框架（Plan-and-Execute + Self-Reflection + Thinking/ToT + Self-Ask），支持多模型供应商、工具调用、会话持久化、多平台接入
+> ⚡ 赛博朋克风格的终端 AI 编码助手，综合 4 种认知框架（Plan-and-Execute + Self-Reflection + Thinking/ToT + Self-Ask）+ LLM 上下文压缩 + RAG 知识库 + Token 可视化，支持多模型供应商、工具调用、会话持久化、多平台接入
 
-**MINGCODE** 是一个轻量级、高颜值的命令行 AI 编码代理。它不再只是单一的 ReAct 循环，而是用状态机调度四种认知框架：复杂任务先规划再执行、执行后反思、失败自动重规划、不确定时主动向用户提问。同时兼容任何 OpenAI 格式 API，可通过微信 / QQ 远程接入，开箱即用。
+**MINGCODE** 是一个轻量级、高颜值的命令行 AI 编码代理。它不再只是单一的 ReAct 循环，而是用状态机调度四种认知框架：复杂任务先规划再执行、执行后反思、失败自动重规划、不确定时主动向用户提问。当对话变长时自动 LLM 摘要压缩早期上下文（超 2/3 阈值触发，可手动 `/compress`），不再受硬轮数限制。每次联网搜索的结果会自动 LLM 归纳为 Obsidian 笔记存入本地知识库（RAG），下次相似问题先查 KB 避免重复联网。所有 LLM 调用的 token 消耗实时可视化（`/tokens` 详细面板）。同时兼容任何 OpenAI 格式 API，可通过微信 / QQ 远程接入，开箱即用。
 
 ---
 
@@ -24,7 +24,10 @@
 - 🛠️ **15+ 内置工具** - Shell、文件读写编辑、Python 执行、网络搜索、Git、HTTP、数学、时间、待办、子智能体、桌面控制（vision）
 - 🧩 **子智能体（Subagent）** - 主 Agent 可自主派生子智能体处理独立子任务，支持有限递归
 - 💬 **多平台接入** - 微信（ClawBot）、QQ（OneBot 11 + 官方 Bot），远程也能用
-- 💾 **会话持久化** - 自动截断超长对话，支持保存/加载/删除历史会话
+- 💾 **会话持久化** - 支持保存/加载/删除历史会话
+- 📦 **上下文压缩（v1.3.0 新增）** - 取消硬轮数限制，token 超 `max_context_tokens * 2/3` 自动 LLM 摘要压缩早期对话，保留最近 K 轮原始消息；`/compress` 手动触发；`/config` 显示 token 进度条
+- 📚 **RAG 知识库（v1.4.0 新增）** - 网络搜索结果自动 LLM 归纳为 Obsidian 兼容 Markdown 笔记存入本地 vault，支持关键词检索（TF 打分 + 标题/标签加权）；Agent 可调 `kb_search`/`kb_read`/`kb_store` 工具复用历史知识，避免重复联网
+- 📊 **Token 消耗可视化（v1.4.0 新增）** - 每次回复后显示紧凑 token 行（prompt in → completion out），`/tokens` 查看详细面板（按模型分组、调用次数、平均 token、最近 5 次调用）；自动支持 API usage 和字符估算兜底
 - 🧠 **自我进化记忆** - 四类长期记忆（偏好/项目/成功/教训），自动从错误中学习
 - 🖥️ **桌面控制** - 截屏 + 鼠标键盘 + vision LLM 分析，对标 Codex computer use
 - ⚙️ **交互式配置** - 内置 `/settings` 向导，无需手动编辑配置文件
@@ -164,6 +167,28 @@ python main.py
 | `/cognitive on` | 启用认知框架（默认） |
 | `/cognitive off` | 关闭认知框架，回退到纯 ReAct |
 
+#### 上下文压缩（v1.3.0 新增）
+| 命令 | 功能 |
+|------|------|
+| `/compress` | 手动强制触发 LLM 摘要压缩（无视阈值，压缩早期对话） |
+| `/config` | 显示 token 使用进度条（含当前/阈值/上限） |
+
+#### RAG 知识库（v1.4.0 新增）
+| 命令 | 功能 |
+|------|------|
+| `/kb` | 列出最近 20 条知识笔记 |
+| `/kb search <query>` | 关键词检索知识库（TF 打分 + 标题/标签加权） |
+| `/kb read <id>` | 按 ID 读取完整笔记 |
+| `/kb stats` | 知识库统计（笔记数、热门标签） |
+| `/kb add <title> \| <body>` | 手动添加一条知识 |
+| `/kb delete <id>` | 按 ID 删除笔记 |
+
+#### Token 可视化（v1.4.0 新增）
+| 命令 | 功能 |
+|------|------|
+| `/tokens` | 显示 Token 消耗面板（总计/按模型分组/最近 5 次调用） |
+| （每次回复后） | 自动显示紧凑 token 行：`Tokens: 1,234 in → 567 out (total 1,801) | 3 calls` |
+
 #### 会话管理
 | 命令 | 功能 |
 |------|------|
@@ -257,6 +282,35 @@ cognitive:
 > 帮我打开微信，给张三发一条消息说"你好"
 ```
 
+### RAG 知识库（v1.4.0 新增）
+
+每次网络搜索/抓取的结果会自动 LLM 归纳为 Obsidian 兼容的 Markdown 笔记，存入本地 vault。下次相似问题先查 KB，避免重复联网。
+
+- **自动归纳** - `WebSearchTool` / `WebFetchTool` 执行成功后钩入 `KnowledgeBase.store_search_result()`
+- **非阻塞设计** - KB 存储失败不影响搜索结果返回；LLM 不可用时降级为截取原始结果入库
+- **结构化笔记** - YAML frontmatter（id/title/source/query/urls/tags/created）+ Markdown 正文（摘要/关键发现/详细内容/来源）
+- **关键词检索** - 中英文分词（英文按单词，中文按 2-gram）+ TF 打分 + 标题命中加权 ×3 + 标签命中加权 ×2
+- **Obsidian 兼容** - 把 `vault_path` 配置为你的 Obsidian vault 目录，即可在 Obsidian 中直接浏览笔记（支持 frontmatter、标签、双链）
+- **Agent 工具** - `kb_search`（关键词检索）/ `kb_read`（按 ID 读取）/ `kb_store`（主动写入）
+- **子智能体共享** - SubAgent 的搜索结果也归入同一个 KB，主子 Agent 共享知识
+
+```bash
+> 搜索 LangChain StateGraph 的用法
+# 自动归纳入库 → 下次问类似问题，AI 先调 kb_search 复用历史知识
+> LangChain 怎么定义条件边？
+> /kb search langgraph 条件边
+```
+
+### Token 消耗可视化（v1.4.0 新增）
+
+所有 LLM 调用的 token 消耗实时跟踪，支持 API usage 和字符估算兜底两种模式。
+
+- **每次回复后显示紧凑行** - `Tokens: 1,234 in → 567 out (total 1,801) | 3 calls`
+- **`/tokens` 详细面板** - 会话总量、按模型分组、调用次数、平均 token、最近 5 次调用
+- **流式 usage 提取** - 通过 `stream_options.include_usage: true` 请求流式响应的 token 用量
+- **字符估算兜底** - API 未返回 usage 时按 4 字符 ≈ 1 token 估算
+- **新会话重置** - `/clear` 或 `/new` 清空对话时 token 计数清零
+
 ### 微信 / QQ 接入
 
 **微信 ClawBot**：`/wechat login` 扫码登录后，`/wechat start` 开始监听。微信消息会转发给 MINGCODE 处理并自动回复。
@@ -281,8 +335,10 @@ mingcode/
 │   ├── reflector.py      # Reflector 假成功检测 + 降级（v1.2.0 新增）
 │   ├── self_asker.py     # SelfAsker 不确定性检测（v1.2.0 新增）
 │   ├── subagent.py       # 子智能体（独立上下文 ReAct）
-│   ├── llm.py            # LLM API 客户端（含 reasoning_effort 支持）
-│   ├── memory.py         # 对话记忆与会话管理
+│   ├── llm.py            # LLM API 客户端（含 reasoning_effort + token usage 提取）
+│   ├── memory.py         # 对话记忆与会话管理 + 上下文压缩（v1.3.0）
+│   ├── token_tracker.py  # Token 消耗跟踪器（v1.4.0 新增）
+│   ├── knowledge_base.py # RAG 知识库（Obsidian vault 归纳+检索）（v1.4.0 新增）
 │   ├── long_term_memory.py    # 自我进化长期记忆
 │   ├── todo.py           # 待办清单（跨会话持久化）
 │   ├── wechat_bot.py     # 微信 ClawBot (iLink) 客户端
@@ -293,7 +349,7 @@ mingcode/
 │   ├── shell.py          # Shell 命令执行
 │   ├── files.py          # 文件读写编辑
 │   ├── code.py           # Python 代码执行
-│   ├── search.py         # 网络搜索
+│   ├── search.py         # 网络搜索（含 KB 自动归纳入库钩子 v1.4.0）
 │   ├── subagent.py       # 子智能体工具（task）
 │   ├── ask_user.py       # 向用户提问（Self-Ask 调用）
 │   ├── plan_tot.py       # ToT 规划薄包装（v1.2.0 改为调 Planner）
@@ -302,11 +358,13 @@ mingcode/
 │   ├── math_tool.py      # 精确数学（decimal）
 │   ├── http_tool.py      # HTTP 请求调试
 │   ├── git_tool.py       # Git 版本控制
-│   └── computer_use.py   # 桌面控制（截屏+鼠标键盘+vision）
+│   ├── computer_use.py   # 桌面控制（截屏+鼠标键盘+vision）
+│   ├── office.py         # Office 文档读写（Word/PDF/Excel/PPT）
+│   └── kb_tool.py        # 知识库工具（kb_search/kb_read/kb_store）（v1.4.0 新增）
 ├── ui/                   # 终端 UI
 │   ├── console.py        # Rich 渲染组件
 │   └── theme.py          # 赛博主题配色
-├── tests/                # 单元测试（174 个，覆盖认知框架全流程）
+├── tests/                # 单元测试（261 个，覆盖认知框架+压缩+KB+Token）
 ├── docs/superpowers/     # 设计文档与实现计划
 │   ├── specs/            # 设计规格
 │   └── plans/            # 实现计划（TDD 任务分解）
@@ -358,7 +416,9 @@ tools:
     max_results: 5
 
 memory:
-  max_history: 50
+  max_history: 50              # 向后兼容字段，不再用于硬截断
+  max_context_tokens: null     # 上下文 token 上限，null=继承 llm.max_tokens；自动压缩阈值 = 此值 * 2/3
+  keep_recent_turns: 6         # 压缩时保留最近 K 轮原始对话（每轮 = user + assistant）
 
 cognitive:
   enabled: true           # 总开关，关闭后回退到纯 ReAct
@@ -366,6 +426,12 @@ cognitive:
   max_replans: 3          # L2 最大重规划次数
   max_task_retries: 2     # L1 单任务最大重试次数
   self_ask: false         # Self-Ask 不确定性检测（开启会拖慢复杂任务）
+
+knowledge_base:           # RAG 知识库（v1.4.0）
+  enabled: true           # 总开关，关闭后搜索结果不入库
+  vault_path: null        # Obsidian vault 路径，留空用用户数据目录/vault/
+  auto_store: true        # 网络搜索/抓取后自动 LLM 归纳入库
+  max_note_length: 4000   # 单条笔记最大字符数
 
 wechat:
   enabled: false
@@ -408,7 +474,10 @@ python -m pytest tests/test_executor.py -v
 - **Reflector** - LLM 假成功检测 + 失败兜底（7 个）
 - **SelfAsker** - 不确定性检测 + ask_user 调用（11 个）
 - **Executor** - ReAct 循环 + 不确定性触发（10 个）
-- 其他工具、记忆、IM 接入等（122 个）
+- **Memory Compress** - 上下文压缩 + 阈值触发 + 多次合并 + 兜底（14 个，v1.3.0）
+- **KnowledgeBase** - 归纳/存储/检索/分词/钩子/工具（34 个，v1.4.0）
+- **TokenTracker** - record/estimate/summary/by_model/reset/format（13 个，v1.4.0）
+- 其他工具、记忆、IM 接入等（148 个）
 
 ---
 
@@ -416,7 +485,7 @@ python -m pytest tests/test_executor.py -v
 
 如果你想从零开始学习复刻这个项目，请参考保姆级学习指南：[MINGCODE_LEARNING_ROADMAP.md](MINGCODE_LEARNING_ROADMAP.md)
 
-学习路线涵盖 12 个阶段，从 Python 工程化基础到 v1.2.0 认知框架综合实现，每个阶段都有：
+学习路线涵盖 14 个阶段，从 Python 工程化基础到 v1.4.0 RAG 知识库 + Token 可视化综合实现，每个阶段都有：
 - 核心知识点 + 练习任务
 - 对应项目文件参考
 - 验收标准 + 工程改进对比
@@ -427,7 +496,9 @@ python -m pytest tests/test_executor.py -v
 
 | 版本 | 主要特性 |
 |------|---------|
-| **v1.2.0** | 综合认知框架（Plan-Execute + Self-Reflection + ToT + Self-Ask），状态机调度，L1/L2/L3 分级降级 |
+| **v1.4.0** | **RAG 知识库 + Token 可视化**：网络搜索结果自动 LLM 归纳为 Obsidian 笔记存入 vault，`/kb` 命令族检索/读取/写入/删除；`/tokens` 详细面板 + 每次回复后紧凑 token 行；TF 打分 + 标题/标签加权检索；KB 钩子非阻塞设计 |
+| **v1.3.0** | **上下文压缩**：取消硬轮数限制，token 超 `max_context_tokens * 2/3` 自动 LLM 摘要压缩早期对话；`/compress` 手动触发；`/config` 显示 token 进度条 |
+| v1.2.0 | 综合认知框架（Plan-Execute + Self-Reflection + ToT + Self-Ask），状态机调度，L1/L2/L3 分级降级 |
 | v1.1.1 | reasoning_effort 参数支持推理模型思考深度 |
 | v1.1.0 | Computer Use 桌面控制（截屏 + vision + 鼠标键盘） |
 | v1.0.x | 基础 ReAct Agent + 工具系统 + 微信/QQ 接入 + 会话持久化 |
@@ -450,6 +521,12 @@ MIT License - 详见 LICENSE 文件
 - v1.2.0 认知框架默认开启，如遇性能问题可用 `/cognitive off` 关闭回退到纯 ReAct
 - `self_ask` 默认关闭以保持速度，需要 AI 主动提问澄清时再开启
 - 推理模型（o-series / DeepSeek-R1 等）才支持 reasoning_effort，普通模型设置后会报 400
+- v1.3.0 上下文压缩取消硬轮数限制：token 超 `max_context_tokens * 2/3` 自动触发 LLM 摘要，无 LLM 客户端时退化为截断标记
+- 压缩失败（如 LLM 超时）不阻塞对话，会退化为截断标记保留最近 K 轮
+- v1.4.0 RAG 知识库默认启用：网络搜索/抓取后自动入库（可通过 `knowledge_base.auto_store: false` 关闭）
+- KB 存储失败不影响搜索/抓取主流程（非阻塞设计）；LLM 不可用时降级为截取原始结果入库
+- 知识库 vault 目录默认在用户数据目录下，可配置为 Obsidian vault 路径直接在 Obsidian 中浏览
+- Token 跟踪支持 API usage 和字符估算兜底两种模式；流式响应通过 `stream_options.include_usage` 请求 usage
 
 ---
 
@@ -458,7 +535,8 @@ MIT License - 详见 LICENSE 文件
 - [ ] 思维树多轮迭代 - PlanToTTool 支持多轮自反思优化（当前是单次调用）
 - [ ] ask_user 多渠道接入 - 微信/QQ 远程用户也能回答 AI 提问
 - [ ] CognitiveController 手动模式 - `/plan` `/reflect` 等子命令细粒度控制
-- [ ] 向量语义检索记忆 - 用 embedding 模型提升记忆召回准确率
+- [x] RAG 知识库 - 网络搜索结果自动归纳为 Obsidian 笔记，TF 打分检索（v1.4.0 已实现基础版）
+- [ ] 向量语义检索 - 用 embedding 模型替代 TF 打分，提升知识库召回准确率
 - [ ] 多会话切换 UI - 同时管理多个独立对话
 - [ ] 主题切换 - 支持其他配色（除霓虹青绿外）
 - [ ] 对话导出为 Markdown

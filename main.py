@@ -11,7 +11,7 @@ from core.wechat_bot import WeChatBot
 from core.qq_onebot import QQOneBot
 from core.qq_official import QQOfficialBot
 from ui.console import console, print_logo, print_user_message, print_assistant_message, print_error, get_prompt
-from ui.theme import NEON_TEAL
+from ui.theme import NEON_TEAL, NEON_PURPLE
 from rich.text import Text
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
@@ -174,7 +174,9 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print("  /model <name>   Switch to a different model")
         console.print("  /reasoning [off|low|medium|high]  Set reasoning effort (thinking models only)")
         console.print("  /cognitive [on|off]  Toggle cognitive controller (Plan-Reflect)")
-        console.print("  /config         Show current configuration")
+        console.print("  /config         Show current configuration + token usage bar")
+        console.print("  /tokens         Show token usage panel (by model, calls, avg per call)")
+        console.print("  /compress       Manually compress context (LLM summarizes early conversation)")
         console.print("  /settings       Configure LLM provider (interactive)")
         console.print("  /tools          List available tools")
         console.print("  /debug          Show diagnostic info + test API call")
@@ -195,6 +197,14 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print()
         console.print("[bold]Subagent:[/bold]")
         console.print("  /sub <task>     Run a one-off subagent for a task")
+        console.print()
+        console.print("[bold]Knowledge Base (RAG):[/bold]")
+        console.print("  /kb                       List recent knowledge notes")
+        console.print("  /kb search <query>        Search notes by keyword")
+        console.print("  /kb read <id>             Read a note by ID")
+        console.print("  /kb stats                 Show knowledge base stats")
+        console.print("  /kb add <title> | <body>   Manually add a note")
+        console.print("  /kb delete <id>           Delete a note by ID")
         console.print()
         console.print("[bold]Todo List:[/bold]")
         console.print("  /todo           List all todos (pending + in_progress + completed)")
@@ -441,10 +451,37 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         console.print(f"  Temperature: {llm_config.get('temperature', 0.7)}")
         console.print(f"  Max Tokens:  {llm_config.get('max_tokens', 4096)}")
         console.print(f"  Reasoning:   {llm_config.get('reasoning_effort') or 'off'}")
-        console.print(f"  Max History: {mem_config.get('max_history', 20)} turns")
+        console.print(f"  Max History:       {mem_config.get('max_history', 50)} turns (legacy)")
+        console.print(f"  Context Tokens:    {agent.memory.max_context_tokens} (compress at {agent.memory.get_compress_threshold()} = 2/3)")
+        console.print(f"  Keep Recent Turns: {agent.memory.keep_recent_turns}")
+        # 当前压缩状态
+        status = agent.memory.compression_status()
+        pct = (status["current_tokens"] * 100 // max(1, status["max_context_tokens"])) if status["max_context_tokens"] else 0
+        bar_len = 20
+        filled = int(pct / 100 * bar_len)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        console.print(f"  Tokens:            [{bar}] {status['current_tokens']}/{status['max_context_tokens']} ({pct}%)")
+        if status["has_summary"]:
+            console.print(f"  Summary:           [green]yes[/green] (early conversation compressed)")
         if agent.memory.current_session_name:
             console.print(f"  Session:     {agent.memory.current_session_name}")
         console.print()
+        return True
+    elif cmd == '/compress':
+        # 手动触发上下文压缩
+        status_before = agent.memory.compression_status()
+        if not status_before["has_summary"] and status_before["message_count"] <= agent.memory.keep_recent_turns * 2:
+            console.print(f"[yellow]Not enough messages to compress (need > {agent.memory.keep_recent_turns * 2} messages, have {status_before['message_count']}).[/yellow]")
+            return True
+        console.print(f"[{NEON_TEAL}]Compressing context (LLM summarizing early conversation)...[/{NEON_TEAL}]")
+        ok = agent.memory.compress_now()
+        status_after = agent.memory.compression_status()
+        if ok:
+            saved = status_before["current_tokens"] - status_after["current_tokens"]
+            console.print(f"[green]✓ Compressed[/green]  {status_before['current_tokens']} → {status_after['current_tokens']} tokens (saved {saved})")
+            console.print(f"  Messages: {status_before['message_count']} → {status_after['message_count']}")
+        else:
+            console.print(f"[yellow]Nothing to compress[/yellow]  (need more than {agent.memory.keep_recent_turns * 2} non-summary messages)")
         return True
     elif cmd == '/settings':
         run_settings_wizard(agent, config)
@@ -469,12 +506,185 @@ def handle_slash_command(cmd, arg, agent, config, wechat_bot: WeChatBot,
         print_assistant_message(f"[子智能体] {result}")
         console.print()
         return True
+    elif cmd == '/kb':
+        kb = agent.knowledge_base
+        if not getattr(kb, "enabled", False):
+            console.print("[yellow]Knowledge base is disabled (config: knowledge_base.enabled)[/yellow]")
+            return True
+        sub = (arg or "").split(maxsplit=1)
+        action = sub[0].lower() if sub and sub[0] else "list"
+        rest = sub[1].strip() if len(sub) > 1 else ""
+
+        if action in ("list", "ls", ""):
+            notes = kb.list_notes(limit=20)
+            if not notes:
+                console.print(f"[yellow]No notes yet.[/yellow]  Search results will be auto-stored when web_search/web_fetch runs.")
+                console.print(f"[dim]Vault: {kb.vault_path}[/dim]")
+                return True
+            console.print()
+            console.print(f"[{NEON_TEAL} bold]═══ Knowledge Base ({len(notes)} recent) ═══[/{NEON_TEAL} bold]")
+            table = Table(border_style=NEON_TEAL, show_lines=False)
+            table.add_column("#", style="dim", width=4)
+            table.add_column("ID", style=NEON_TEAL, width=22)
+            table.add_column("Title", width=40)
+            table.add_column("Tags", width=24)
+            table.add_column("Created", style="dim", width=20)
+            for i, n in enumerate(notes, 1):
+                tags_str = ", ".join(n["tags"][:3]) + ("..." if len(n["tags"]) > 3 else "")
+                created = (n.get("created") or "").replace("T", " ")[5:19]
+                table.add_row(str(i), n["id"], n["title"][:40], tags_str, created)
+            console.print(table)
+            console.print(f"[dim]Vault: {kb.vault_path}[/dim]")
+            console.print()
+            return True
+
+        if action == "search":
+            if not rest:
+                console.print("[yellow]Usage: /kb search <query>[/yellow]")
+                return True
+            results = kb.search(rest, top_k=5)
+            if not results:
+                console.print(f"[yellow]No notes found for '{rest}'[/yellow]")
+                return True
+            console.print()
+            console.print(f"[{NEON_TEAL} bold]Search: '{rest}' ({len(results)} hits)[/{NEON_TEAL} bold]")
+            for i, r in enumerate(results, 1):
+                console.print(f"\n[{NEON_TEAL}]{i}. {r['title']}[/{NEON_TEAL}] [dim]score={r['score']}[/dim]")
+                console.print(f"   [dim]ID: {r['id']}[/dim]")
+                if r.get("tags"):
+                    console.print(f"   [dim]Tags: {', '.join(r['tags'])}[/dim]")
+                console.print(f"   {r['preview']}")
+            console.print()
+            return True
+
+        if action == "read":
+            if not rest:
+                console.print("[yellow]Usage: /kb read <id>[/yellow]")
+                return True
+            note = kb.get_note(rest.strip())
+            if not note:
+                console.print(f"[red]Note not found: {rest}[/red]")
+                return True
+            console.print()
+            console.print(f"[{NEON_TEAL} bold]{note['title']}[/{NEON_TEAL} bold]")
+            console.print(f"[dim]ID: {note['id']}[/dim]")
+            console.print(f"[dim]Created: {note['created']}[/dim]")
+            if note.get("tags"):
+                console.print(f"[dim]Tags: {', '.join(note['tags'])}[/dim]")
+            if note.get("query"):
+                console.print(f"[dim]Query: {note['query']}[/dim]")
+            if note.get("urls"):
+                console.print("[dim]URLs:[/dim]")
+                for u in note["urls"]:
+                    console.print(f"[dim]  - {u}[/dim]")
+            console.print()
+            console.print(note["content"])
+            console.print()
+            return True
+
+        if action == "stats":
+            s = kb.stats()
+            console.print()
+            console.print(f"[{NEON_TEAL} bold]═══ Knowledge Base Stats ═══[/{NEON_TEAL} bold]")
+            console.print()
+            console.print(f"  Enabled:      {s['enabled']}")
+            console.print(f"  Auto-store:   {s['auto_store']}")
+            console.print(f"  Total notes:  {s['total_notes']}")
+            console.print(f"  Vault path:   {s['vault_path']}")
+            if s["top_tags"]:
+                console.print()
+                console.print("[bold]Top Tags[/bold]")
+                for tag, cnt in s["top_tags"]:
+                    console.print(f"  {tag}: {cnt}")
+            console.print()
+            return True
+
+        if action == "add":
+            if not rest or "|" not in rest:
+                console.print("[yellow]Usage: /kb add <title> | <body>[/yellow]")
+                return True
+            title, body = rest.split("|", 1)
+            title = title.strip()
+            body = body.strip()
+            if not title or not body:
+                console.print("[yellow]Both title and body are required.[/yellow]")
+                return True
+            result = kb.store_text(title, body, source="manual")
+            if result.get("error"):
+                console.print(f"[red]{result['error']}[/red]")
+                return True
+            console.print(f"[{NEON_TEAL}]Added note: {result['title']}[/{NEON_TEAL}]")
+            console.print(f"  [dim]ID: {result['id']}[/dim]")
+            console.print(f"  [dim]Tags: {', '.join(result['tags'])}[/dim]")
+            return True
+
+        if action in ("delete", "del", "rm"):
+            if not rest:
+                console.print("[yellow]Usage: /kb delete <id>[/yellow]")
+                return True
+            if kb.delete_note(rest.strip()):
+                console.print(f"[{NEON_TEAL}]Deleted note: {rest}[/{NEON_TEAL}]")
+            else:
+                console.print(f"[red]Note not found: {rest}[/red]")
+            return True
+
+        console.print(f"[yellow]Unknown /kb action: {action}. Try: list / search / read / stats / add / delete[/yellow]")
+        return True
+    elif cmd == '/tokens':
+        tracker = agent.token_tracker
+        s = tracker.summary()
+        console.print()
+        console.print(f"[{NEON_PURPLE} bold]═══ Token Usage ═══[/{NEON_PURPLE} bold]")
+        console.print()
+        if s["call_count"] == 0:
+            console.print(f"[dim]No LLM calls recorded yet.[/dim]")
+            console.print()
+            return True
+        # 概览
+        console.print("[bold]Session Total[/bold]")
+        console.print(f"  Calls:         {s['call_count']}")
+        console.print(f"  Prompt:        {s['total_prompt']:,} tokens")
+        console.print(f"  Completion:    {s['total_completion']:,} tokens")
+        console.print(f"  Total:         {s['total_tokens']:,} tokens")
+        console.print(f"  Avg per call:  {s['avg_per_call']:,} tokens")
+        console.print()
+        # 按模型分组
+        grouped = tracker.by_model()
+        if len(grouped) > 1 or (len(grouped) == 1 and list(grouped.keys())[0] != (config.get('llm', {}).get('model', ''))):
+            console.print("[bold]By Model[/bold]")
+            table = Table(border_style=NEON_PURPLE, show_lines=False)
+            table.add_column("Model", style=NEON_PURPLE)
+            table.add_column("Calls", justify="right", width=8)
+            table.add_column("Prompt", justify="right", width=12)
+            table.add_column("Completion", justify="right", width=12)
+            table.add_column("Total", justify="right", width=12)
+            for m, st in grouped.items():
+                table.add_row(m, str(st["calls"]), f"{st['prompt']:,}", f"{st['completion']:,}", f"{st['total']:,}")
+            console.print(table)
+            console.print()
+        # 最近 5 次调用
+        recent = tracker.calls[-5:]
+        console.print(f"[bold]Recent Calls (last {len(recent)})[/bold]")
+        rtable = Table(border_style=NEON_PURPLE, show_lines=False)
+        rtable.add_column("#", style="dim", width=4)
+        rtable.add_column("Model", style=NEON_PURPLE)
+        rtable.add_column("Prompt", justify="right", width=10)
+        rtable.add_column("Completion", justify="right", width=10)
+        rtable.add_column("Total", justify="right", width=10)
+        rtable.add_column("Time", style="dim", width=20)
+        for i, c in enumerate(recent, 1):
+            ts = c["timestamp"].replace("T", " ")[5:19]
+            rtable.add_row(str(i), c["model"] or "unknown", f"{c['prompt_tokens']:,}",
+                           f"{c['completion_tokens']:,}", f"{c['total_tokens']:,}", ts)
+        console.print(rtable)
+        console.print()
+        return True
     elif cmd == '/debug':
         console.print()
         console.print(f"[{NEON_TEAL} bold]═══ MINGCODE Diagnostic ═══[/{NEON_TEAL} bold]")
         console.print()
         console.print("[bold]Environment[/bold]")
-        console.print(f"  Version:       1.2.0")
+        console.print(f"  Version:       1.4.0")
         console.print(f"  Python:       {sys.version.split()[0]}")
         console.print(f"  Platform:     {sys.platform}")
         console.print(f"  Frozen:       {getattr(sys, 'frozen', False)}")
@@ -963,6 +1173,10 @@ def main():
                         full_response += chunk
                 if full_response:
                     print_assistant_message(full_response)
+                    # 显示 token 消耗
+                    token_line = agent.token_tracker.format_compact()
+                    if token_line:
+                        console.print(f"[{NEON_PURPLE}]{token_line}[/{NEON_PURPLE}]", style="dim")
             except KeyboardInterrupt:
                 console.print("\n[yellow]Interrupted[/yellow]")
                 continue

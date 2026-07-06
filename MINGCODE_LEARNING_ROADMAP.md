@@ -1,6 +1,6 @@
-# 🚀 MINGCODE 保姆级复刻学习路线 v1.0.8
+# 🚀 MINGCODE 保姆级复刻学习路线 v1.4.0
 
-**总周期：10-12周 | 每日投入：1-2小时 | 目标：1:1完整复刻**
+**总周期：11-13周 | 每日投入：1-2小时 | 目标：1:1完整复刻（含 v1.4.0 RAG 知识库 + Token 可视化）**
 
 ---
 
@@ -67,6 +67,9 @@
 | **分级降级 L1/L2/L3** | 任务失败时按 retries 计数升级：L1 局部重试（回 EXECUTING）→ L2 整体重规划（回 PLANNING 带 feedback）→ L3 报错给用户（进 DONE） |
 | **Self-Ask 不确定性检测** | Executor 每轮 ReAct 后调 SelfAsker.check_uncertainty（~100 token LLM 判断），uncertain 时调 ask_user 工具向用户提问，回答塞回 memory 作为 clarification |
 | **延迟构造 + fallback** | NeonAgent.cognitive_controller property 首次访问才构造 CognitiveController；cognitive 异常时 fallback 走现有 ReAct，保证向后兼容 |
+| **LLM 上下文压缩（v1.3.0）** | ConversationMemory 取消硬轮数限制：token 超 `max_context_tokens * 2/3` 时调 LLM 把早期对话摘要成一条 system 消息，保留最近 K 轮原始消息；多次压缩合并旧摘要；无 LLM 时退化为截断标记；`/compress` 手动触发，`/config` 显示 token 进度条 |
+| **RAG 知识库（v1.4.0）** | KnowledgeBase 把网络搜索结果 LLM 归纳为 Obsidian 兼容 Markdown 笔记（带 YAML frontmatter + tags），存入本地 vault；WebSearchTool/WebFetchTool 通过 `knowledge_base` 属性钩入自动入库（非阻塞设计，失败不影响搜索结果）；TF 打分 + 标题命中加权 ×3 + 标签命中加权 ×2 关键词检索；中英文分词（英文按单词，中文按 2-gram）；Agent 可调 `kb_search`/`kb_read`/`kb_store` 工具复用历史知识 |
+| **Token 消耗可视化（v1.4.0）** | TokenTracker 累计每次 LLM 调用的 prompt/completion/total tokens；LLMClient 在非流式和流式（`stream_options.include_usage`）两条路径都提取 usage 并自动记录；API 未返回 usage 时按 4 字符 ≈ 1 token 估算兜底；每次回复后显示紧凑行，`/tokens` 查看详细面板（按模型分组、调用次数、最近 5 次调用）；`/clear` 重置计数 |
 
 ### 项目架构总览
 ```
@@ -308,16 +311,18 @@ for line in response.iter_lines():
 
 ---
 
-## 🟡 阶段四：对话记忆与会话管理（3-4天）
-**目标：实现多轮对话、记住上下文、会话持久化**
+## 🟡 阶段四：对话记忆与会话管理 + 上下文压缩（4-6天）
+**目标：实现多轮对话、记住上下文、会话持久化、token 超阈值时 LLM 摘要压缩**
 
 ### 📚 核心知识点
 | 知识点 | 重要程度 | 说明 |
 |--------|---------|------|
 | 消息列表管理 | ⭐⭐⭐⭐⭐ | system/user/assistant/tool 四种角色 |
-| 滑动窗口 | ⭐⭐⭐⭐ | 保留最近 N 轮对话（*2条消息/轮），避免 token 超限 |
+| Token 估算 | ⭐⭐⭐⭐⭐ | `len(content) // 4` 粗估 token 数，决定何时压缩 |
+| 上下文压缩（v1.3.0 核心） | ⭐⭐⭐⭐⭐ | token 超 `max_context_tokens * 2/3` 时调 LLM 摘要早期对话 |
+| 摘要消息合并 | ⭐⭐⭐⭐ | 多次触发压缩时新摘要基于旧摘要 + 后续对话生成，始终只有一条摘要 |
 | 系统提示词（System Prompt） | ⭐⭐⭐⭐⭐ | Agent 的"人设"、工作流程指令、工具描述 |
-| 会话序列化 | ⭐⭐⭐⭐ | JSON 保存/加载完整对话历史 |
+| 会话序列化 | ⭐⭐⭐⭐ | JSON 保存/加载完整对话历史（含压缩配置字段） |
 | 自动命名 | ⭐⭐⭐ | 从第一条用户消息自动生成会话名 |
 | 消息预览 | ⭐⭐⭐ | 列表显示时截断长消息 |
 
@@ -326,22 +331,47 @@ for line in response.iter_lines():
    - `add_message(role, content)` 添加消息
    - `get_messages()` 获取所有消息（包含system prompt）
    - `clear()` 清空历史
-2. **Task 2**：添加滑动窗口功能 - 只保留最近 N 轮对话（默认20轮）
+2. **Task 2**：实现 token 估算 `estimate_tokens()` - 用 `len(content) // 4` 粗估
 3. **Task 3**：实现系统提示词构建 `build_system_prompt(tools_list)`，包含TDD/YAGNI/DRY工作流、工具使用说明
-4. **Task 4**：实现会话保存功能 `save(name=None)` - 将messages序列化到JSON文件，name为空时自动从首条消息命名
-5. **Task 5**：实现会话加载功能 `load(name)` - 从JSON文件恢复对话历史
+4. **Task 4**：实现会话保存功能 `save(name=None)` - 将 messages + 压缩配置序列化到 JSON
+5. **Task 5**：实现会话加载功能 `load(name)` - 从 JSON 恢复对话历史，旧会话文件无新字段时用默认值
 6. **Task 6**：实现 `list_sessions()` - 列出所有保存的会话，带保存时间、消息数、内容预览
 7. **Task 7**：实现 `delete_session(name)` - 删除指定会话
+8. **Task 8（v1.3.0 核心）**：实现上下文压缩
+   - `set_llm_client(llm)` 注入 LLM 客户端
+   - `get_compress_threshold()` 返回 `max_context_tokens * 2 // 3`
+   - `_maybe_compress()` 在 `add_message` 后自动检查阈值触发压缩
+   - `_compress_history(keep_count)` 把早期对话发给 LLM 生成摘要，组装 `[新摘要] + recent`
+   - `_generate_summary(old_summary, messages)` 构造压缩 prompt，无 LLM 时返回截断标记
+9. **Task 9（v1.3.0 核心）**：实现手动压缩和状态查询
+   - `compress_now()` 强制触发压缩（忽略阈值），返回 bool
+   - `compression_status()` 返回 `{current_tokens, threshold, max_context_tokens, is_over_threshold, ...}`
+10. **Task 10**：在 main.py 添加 `/compress` 命令，`/config` 显示 token 进度条
 
 ### 📂 对应项目文件参考
-- [core/memory.py](file:///c:/Users/bloon/Downloads/neon_agent/core/memory.py) - 对话记忆、系统提示词、会话持久化
+- [core/memory.py](file:///c:/Users/bloon/Downloads/neon_agent/core/memory.py) - 对话记忆、系统提示词、会话持久化、上下文压缩
+- [tests/test_memory_compress.py](file:///c:/Users/bloon/Downloads/neon_agent/tests/test_memory_compress.py) - 14 个压缩相关单元测试
+
+### 💡 关键提示
+- 压缩阈值用 `max_context_tokens * 2 // 3`（不是直接用 max），给 LLM 留出余量生成回复
+- 摘要消息用 `compressed_summary: True` 标记字段区分，避免被再次压缩
+- 多次压缩时旧摘要作为"之前对话摘要"传给 LLM，新摘要合并旧信息，**始终只有一条摘要**
+- 无 LLM 客户端时退化为截断标记（不抛异常），LLM 调用失败也退化为截断标记
+- `max_history` 字段保留向后兼容（旧会话文件仍可加载），但不再用于硬截断
+- `max_context_tokens` 默认从 `llm.max_tokens` 继承，避免重复配置
 
 ### ✅ 验收标准
 - [ ] 可以多轮对话，LLM 能记住之前说的话
 - [ ] 输入 `/new`/`/clear` 能清空对话历史
 - [ ] `/save`/`/load`/`/sessions`/`/delsession` 命令工作正常
-- [ ] 超过20轮自动截断最早的消息
-- [ ] 会话列表显示正确的预览
+- [ ] 旧会话文件（无 max_context_tokens 字段）能正常加载，使用默认值
+- [ ] token 超 `max_context_tokens * 2/3` 自动触发 LLM 摘要压缩
+- [ ] 压缩后保留最近 `keep_recent_turns * 2` 条原始消息
+- [ ] 多次压缩只有一条摘要消息（旧摘要被合并）
+- [ ] 无 LLM 客户端时退化为截断标记，不抛异常
+- [ ] `/compress` 命令能手动强制触发压缩
+- [ ] `/config` 显示 token 进度条（当前/阈值/上限）
+- [ ] 14 个压缩相关单元测试全部通过
 
 ---
 
@@ -1270,8 +1300,71 @@ def ask(self, task_desc, uncertainty_reason):
 4. **SelfAsker 失败不阻断**：LLM 异常、ask_user 异常都兜底返回，不阻塞 Executor 主循环
 5. **延迟构造 + fallback**：cognitive_controller property 首次访问才构造，异常时 fallback 走 ReAct，保证 v1.1.1 用户无感知升级
 
+### 🛠️ 工程改进（v1.3.0）
+v1.3.0 是上下文管理的重大升级：取消每会话对话轮数硬限制（`max_history` 不再用于硬截断），改为基于 token 阈值的 LLM 摘要压缩。当对话变长时自动把早期对话用 LLM 摘要成一条 system 消息，保留最近 K 轮原始消息，让 Agent 能处理长任务不丢关键上下文。
+
+**核心机制**：
+- 自动压缩阈值 = `max_context_tokens * 2 // 3`（给 LLM 留 1/3 余量生成回复）
+- 每条消息添加后自动检查 token，超阈值触发 LLM 摘要
+- 多次压缩时旧摘要作为"之前对话摘要"传给 LLM，**始终只有一条摘要**
+- 无 LLM 客户端 / LLM 调用失败时退化为截断标记，不抛异常
+- `max_context_tokens` 默认从 `llm.max_tokens` 继承
+
+**核心代码**：
+```python
+class ConversationMemory:
+    SUMMARY_FLAG = "compressed_summary"
+    COMPRESS_RATIO_NUMERATOR = 2
+    COMPRESS_RATIO_DENOMINATOR = 3
+
+    def get_compress_threshold(self) -> int:
+        return self.max_context_tokens * 2 // 3
+
+    def _maybe_compress(self) -> None:
+        if self.estimate_tokens() <= self.get_compress_threshold():
+            return
+        keep_count = self.keep_recent_turns * 2  # 每轮 = user + assistant
+        non_summary = [m for m in self.messages if not m.get(self.SUMMARY_FLAG)]
+        if len(non_summary) <= keep_count:
+            return
+        self._compress_history(keep_count)
+
+    def _compress_history(self, keep_count: int) -> None:
+        # 找旧摘要
+        old_summary = None
+        for m in self.messages:
+            if m.get(self.SUMMARY_FLAG):
+                old_summary = m["content"]
+                break
+        recent = self.messages[-keep_count:]
+        early = [m for m in self.messages[:-keep_count] if not m.get(self.SUMMARY_FLAG)]
+        summary_text = self._generate_summary(old_summary, early)
+        self.messages = [{"role": "system", "content": summary_text, self.SUMMARY_FLAG: True}] + recent
+
+    def compress_now(self) -> bool:
+        """手动强制触发压缩，忽略阈值检查。"""
+        keep_count = self.keep_recent_turns * 2
+        non_summary = [m for m in self.messages if not m.get(self.SUMMARY_FLAG)]
+        if len(non_summary) <= keep_count:
+            return False
+        self._compress_history(keep_count)
+        return True
+```
+
+**关键设计决策**：
+1. **2/3 阈值而非 max**：留 1/3 余量给 LLM 生成回复，避免压缩后立刻又超阈值
+2. **摘要用 system 角色**：摘要作为 system 消息放最前，不会被再次压缩
+3. **多次压缩合并摘要**：始终只有一条摘要，新摘要基于旧摘要 + 后续对话生成，避免摘要爆炸
+4. **无 LLM 兜底**：无 LLM 客户端 / LLM 失败时退化为截断标记，不抛异常，对话继续
+5. **向后兼容**：`max_history` 字段保留（旧会话仍可加载），但不再用于硬截断
+6. **max_context_tokens 继承**：默认从 `llm.max_tokens` 继承，避免重复配置
+
+**新增测试**：14 个单元测试（`tests/test_memory_compress.py`）覆盖：阈值不触发、超阈值触发、保留最近 K 轮、无 LLM 兜底、多次压缩合并、向后兼容、手动压缩、2/3 阈值、压缩状态查询等。
+
+
+
 ### ✅ 验收标准
-- [ ] 全部测试通过（171 个）
+- [ ] 全部测试通过（261 个，含 v1.3.0 新增 14 个压缩测试 + v1.4.0 新增 47 个 KB+Token 测试）
 - [ ] chat_with_image 返回 LLM 响应的 content 字符串
 - [ ] chat_with_image 构造的 user content 是 list 形式含 text + image_url
 - [ ] chat_with_image 遇 LLMError 向上抛出（由调用方降级）
@@ -1291,12 +1384,209 @@ def ask(self, task_desc, uncertainty_reason):
 
 ---
 
+## 🟪 阶段十三：RAG 知识库与 Token 可视化（5-7天）
+**目标：网络搜索结果自动归纳存入 Obsidian vault，Agent 可检索复用；所有 LLM 调用的 token 消耗实时可视化**
+
+### 📚 核心知识点
+| 知识点 | 重要程度 | 说明 |
+|--------|---------|------|
+| RAG（检索增强生成） | ⭐⭐⭐⭐⭐ | 外部知识库补充 LLM 上下文，避免重复联网 |
+| 非阻塞钩子设计 | ⭐⭐⭐⭐⭐ | 工具成功后调用 KB 存储但失败不影响主流程 |
+| Obsidian 兼容 Markdown | ⭐⭐⭐⭐⭐ | YAML frontmatter + 正文结构，可被 Obsidian 直接打开 |
+| 关键词检索 + TF 打分 | ⭐⭐⭐⭐ | 词频统计 + 标题命中加权 ×3 + 标签命中加权 ×2 |
+| 中英文分词 | ⭐⭐⭐⭐ | 英文按单词，中文按 2-gram（提升召回） |
+| 停用词过滤 | ⭐⭐⭐ | the/a/is/的/了/是 等无意义词过滤 |
+| LLM 自动归纳 | ⭐⭐⭐⭐⭐ | 用 LLM 把原始搜索结果提炼为结构化知识笔记 |
+| 降级兜底 | ⭐⭐⭐⭐ | LLM 不可用时截取原始结果入库，仍能复用 |
+| API usage 提取 | ⭐⭐⭐⭐⭐ | 从 LLM API 响应 `usage` 字段提取 prompt/completion/total tokens |
+| 流式 usage 请求 | ⭐⭐⭐⭐ | `stream_options: {include_usage: true}` 请求流式响应的 token 用量 |
+| 字符估算兜底 | ⭐⭐⭐ | API 未返回 usage 时按 4 字符 ≈ 1 token 估算 |
+| 依赖注入 | ⭐⭐⭐⭐ | TokenTracker 由 NeonAgent 创建并注入到 LLMClient |
+
+### 🎯 练习任务
+1. **Task 1（Token 跟踪核心）**：实现 `core/token_tracker.py` 的 `TokenTracker` 类
+   - `record(prompt_tokens, completion_tokens, total_tokens, model)` 记录单次调用并累加
+   - `estimate_tokens(text)` 静态方法，`len(text) // 4` 粗估
+   - `record_estimated(prompt_text, completion_text, model)` 字符数估算兜底
+   - `summary()` 返回 `{total_prompt, total_completion, total_tokens, call_count, avg_per_call}`
+   - `by_model()` 按模型分组统计
+   - `reset()` 清空（新会话用）
+   - `format_compact()` 返回紧凑单行字符串
+2. **Task 2（LLM 集成）**：修改 `core/llm.py`
+   - `LLMClient.__init__` 添加 `self.token_tracker = None`
+   - `_record_usage(usage, prompt_text, completion_text)` 方法：API usage 优先，缺失时估算
+   - `_build_payload` 中 stream 模式添加 `payload["stream_options"] = {"include_usage": True}`
+   - `_handle_non_stream` 末尾调用 `self._record_usage(usage, completion_text=result.get("content") or "")`
+   - `_handle_stream` 中捕获 `stream_usage = data.get("usage")`，末尾调用 `self._record_usage(stream_usage, ...)`
+3. **Task 3（Agent 注入）**：修改 `core/agent.py`
+   - `NeonAgent.__init__` 创建 TokenTracker 并赋值给 `self.llm.token_tracker`
+   - `clear_memory()` 末尾调用 `self.token_tracker.reset()`
+4. **Task 4（UI 显示）**：修改 `main.py`
+   - 主循环每次回复后显示 `agent.token_tracker.format_compact()` 紧凑行（用 NEON_PURPLE 颜色）
+   - 添加 `/tokens` 命令：详细面板（总计/按模型分组表/最近 5 次调用表）
+   - `/help` 添加 `/tokens` 说明
+5. **Task 5（KB 核心）**：实现 `core/knowledge_base.py` 的 `KnowledgeBase` 类
+   - `store_search_result(query, raw_results, source, urls)` 调 LLM 归纳 + 写入 vault
+   - `store_text(title, content, tags, source)` 手动写入
+   - `search(query, top_k)` 关键词检索（分词 + TF 打分 + 标题/标签加权）
+   - `get_note(id)` / `list_notes(limit, offset)` / `stats()` / `delete_note(id)`
+   - `_summarize_with_llm()` 用 LLM 归纳，失败时走 `_fallback_summary()` 截取原文
+   - `_tokenize()` 中英文分词（英文按单词，中文按 2-gram）
+   - `_extract_keywords(text, top_k)` 自动提取 Top-K 关键词作为 tags
+   - `_parse_frontmatter()` 解析 YAML frontmatter + body
+   - `_gen_id()` / `_gen_title()` / `_safe_filename()` / `_render_body()` 工具方法
+6. **Task 6（KB 工具）**：实现 `tools/kb_tool.py`
+   - `KnowledgeSearchTool`（kb_search）- 关键词检索
+   - `KnowledgeReadTool`（kb_read）- 按 ID 读取
+   - `KnowledgeStoreTool`（kb_store）- 主动写入
+7. **Task 7（搜索工具钩子）**：修改 `tools/search.py`
+   - `WebSearchTool.__init__` 添加 `self.knowledge_base = None`
+   - `execute` 成功后调用 `_maybe_store(query, result_text, urls)`
+   - `_maybe_store` 非阻塞设计：KB 失败用 try/except 吞掉，不影响主结果
+   - `WebFetchTool` 同样模式
+8. **Task 8（Agent 集成 KB）**：修改 `core/agent.py`
+   - `__init__` 创建 `KnowledgeBase(vault_path, llm_client, auto_store, max_note_length, enabled)`
+   - `_register_tools` 中注入 KB 到 `web_search.knowledge_base` 和 `web_fetch.knowledge_base`
+   - 注册 `KnowledgeSearchTool` / `KnowledgeReadTool` / `KnowledgeStoreTool`
+   - `SubAgentTool` 也传 `knowledge_base=self.knowledge_base`
+9. **Task 9（子智能体共享 KB）**：修改 `core/subagent.py`
+   - `__init__` 增加 `knowledge_base=None` 参数
+   - `_register_tools` 中把 KB 注入到子智能体的 WebSearchTool/WebFetchTool
+10. **Task 10（用户命令）**：修改 `main.py` 添加 `/kb` 命令族
+    - `/kb` - 列出最近 20 条笔记（表格）
+    - `/kb search <query>` - 关键词搜索（带分数和预览）
+    - `/kb read <id>` - 读取完整笔记
+    - `/kb stats` - 统计（笔记数、热门标签 Top-10）
+    - `/kb add <title> | <body>` - 手动添加
+    - `/kb delete <id>` - 删除
+11. **Task 11（配置）**：修改 `config/config.py`
+    - DEFAULT_CONFIG 添加 `knowledge_base` 节（enabled/vault_path/auto_store/max_note_length）
+    - CONFIG_TEMPLATE 添加注释示例
+12. **Task 12（测试）**：编写测试文件
+    - `tests/test_token_tracker.py`（13 个）：record/estimate/summary/by_model/reset/format_compact
+    - `tests/test_knowledge_base.py`（34 个）：分词/停用词/关键词提取/store_search_result/store_text/search/get_note/list_notes/stats/delete_note/KB 钩子/工具族
+
+### 📂 对应项目文件参考
+- [core/token_tracker.py](file:///c:/Users/bloon/Downloads/neon_agent/core/token_tracker.py) - TokenTracker 类
+- [core/knowledge_base.py](file:///c:/Users/bloon/Downloads/neon_agent/core/knowledge_base.py) - KnowledgeBase 类（归纳/存储/检索）
+- [tools/kb_tool.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/kb_tool.py) - KB 工具族（kb_search/kb_read/kb_store）
+- [tools/search.py](file:///c:/Users/bloon/Downloads/neon_agent/tools/search.py) - WebSearchTool/WebFetchTool KB 钩子
+- [core/llm.py](file:///c:/Users/bloon/Downloads/neon_agent/core/llm.py) - LLMClient token usage 提取
+- [core/agent.py](file:///c:/Users/bloon/Downloads/neon_agent/core/agent.py) - NeonAgent 注入 KB 和 TokenTracker
+- [tests/test_token_tracker.py](file:///c:/Users/bloon/Downloads/neon_agent/tests/test_token_tracker.py) - 13 个 TokenTracker 测试
+- [tests/test_knowledge_base.py](file:///c:/Users/bloon/Downloads/neon_agent/tests/test_knowledge_base.py) - 34 个 KB 测试
+
+### 💡 关键提示
+```python
+# TokenTracker：API usage 优先，缺失时估算兜底
+def _record_usage(self, usage, prompt_text="", completion_text=""):
+    if self.token_tracker is None:
+        return
+    if usage and usage.get("total_tokens") is not None:
+        self.token_tracker.record(
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens"),
+            model=self.model,
+        )
+    else:
+        self.token_tracker.record_estimated(prompt_text, completion_text, self.model)
+
+# KB 钩子：非阻塞设计
+def _maybe_store(self, query, result_text, urls):
+    kb = self.knowledge_base
+    if not kb or not getattr(kb, "enabled", False) or not getattr(kb, "auto_store", False):
+        return
+    try:
+        kb.store_search_result(query=query, raw_results=result_text, source="web_search", urls=urls)
+    except Exception:
+        pass  # KB 失败不影响搜索结果返回
+
+# 中文 2-gram 分词提升召回
+def _tokenize(text):
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{1,}", text.lower())  # 英文
+    chinese = re.findall(r"[\u4e00-\u9fa5]+", text)  # 中文段
+    cn_tokens = []
+    for seg in chinese:
+        for i in range(len(seg) - 1):
+            cn_tokens.append(seg[i:i + 2])  # 2-gram
+    return words + cn_tokens
+
+# 检索打分：TF + 标题加权 + 标签加权
+score = sum(freq.get(t, 0) for t in hits)  # 命中 token 频次
+score += len(query_tokens & title_tokens) * 3  # 标题命中 ×3
+score += len(query_tokens & tag_tokens) * 2  # 标签命中 ×2
+
+# Obsidian 兼容 frontmatter
+md = "---\n" + yaml.safe_dump({
+    "id": note_id, "title": title, "source": source,
+    "query": query, "urls": urls, "tags": tags,
+    "created": datetime.now().isoformat(timespec="seconds"),
+}, allow_unicode=True, sort_keys=False) + "---\n\n" + body
+```
+
+**关键设计决策**：
+1. **非阻塞钩子设计**：KB 存储失败用 try/except 吞掉，不影响搜索/抓取主流程返回结果
+2. **LLM 降级兜底**：LLM 不可用时走 `_fallback_summary` 截取前 1500 字符原文入库，仍能复用
+3. **中文 2-gram 分词**：中文按字符切分会丢失语义，2-gram 保留字符对，提升召回
+4. **标题/标签加权**：标题命中 ×3、标签命中 ×2，让命名规范的笔记优先返回
+5. **Obsidian 兼容**：frontmatter + tags + 双链友好格式，配置 `vault_path` 为 Obsidian vault 即可图形化浏览
+6. **Token 估算兜底**：部分供应商流式响应不返回 usage，用 `len(text) // 4` 估算总比没有强
+7. **流式 usage 提取**：`stream_options.include_usage` 是 OpenAI 标准，最后一个 chunk 的 `choices` 为空但 `usage` 存在
+8. **子智能体共享 KB**：SubAgent 也注入 KB，主子 Agent 的搜索结果归入同一库，知识累积更快
+9. **新会话重置 Token**：`/clear` 或 `/new` 清空对话时 token 计数清零，每个会话独立统计
+
+**新增测试**：47 个单元测试（13 个 TokenTracker + 34 个 KnowledgeBase）覆盖：
+- TokenTracker：record 单次/多次累加、estimate_tokens、record_estimated、summary、by_model 单/多模型、reset、format_compact 空/非空
+- KnowledgeBase：分词（英文/中文 2-gram）、停用词过滤、关键词提取、store_search_result（写入 frontmatter、URL 列表、禁用/auto_store off、LLM 异常降级、内容截断）、store_text（手动写入、自动 tags、禁用）、search（找到相关、无匹配、preview、标题加权、top_k）、get_note（按 ID、未知 ID）、list_notes（倒序、limit）、stats、delete_note、WebSearchTool/WebFetchTool 钩子触发入库、KB 失败不影响搜索、KnowledgeSearchTool/ReadTool/StoreTool 工具族
+
+### ✅ 验收标准
+- [ ] 全部测试通过（261 个，含 v1.4.0 新增 47 个 KB+Token 测试）
+- [ ] TokenTracker.record() 累加 prompt/completion/total 正确
+- [ ] estimate_tokens("abcd") == 1，estimate_tokens("你好世界测试一下") == 2
+- [ ] record_estimated 用字符数推算 token
+- [ ] by_model 单/多模型分组统计正确
+- [ ] reset() 清空所有计数和 calls 列表
+- [ ] format_compact 空时返回 ""，有调用时含 "in"/"out"/"total"/"calls"
+- [ ] LLMClient._record_usage 优先用 API usage，缺失时估算
+- [ ] 流式响应 stream_options 包含 include_usage
+- [ ] NeonAgent.__init__ 创建 TokenTracker 并注入 LLMClient
+- [ ] NeonAgent.clear_memory() 调 token_tracker.reset()
+- [ ] KnowledgeBase.store_search_result 写入 .md 文件含 frontmatter
+- [ ] frontmatter 包含 id/title/source/query/urls/tags/created
+- [ ] LLM 异常时降级为截取原文入库（不抛异常）
+- [ ] max_note_length 截断长内容
+- [ ] store_text 手动写入 source=manual
+- [ ] store_text 自动从内容提取 tags
+- [ ] search 关键词匹配返回 Top-N
+- [ ] search 标题命中加权（标题包含 query 的笔记排前）
+- [ ] search 返回 preview 字段
+- [ ] get_note 按 ID 读取完整内容
+- [ ] list_notes 按文件 mtime 倒序
+- [ ] stats 返回笔记数和 Top-10 标签
+- [ ] delete_note 删除文件，未知 ID 返回 False
+- [ ] WebSearchTool 成功后调用 kb.store_search_result
+- [ ] WebSearchTool 未注入 KB 时不影响搜索
+- [ ] WebSearchTool KB 存储失败不影响搜索结果返回
+- [ ] WebFetchTool 成功后调用 kb.store_search_result（source=web_fetch）
+- [ ] KnowledgeSearchTool 返回格式化结果（含 ID/标签/分数/预览）
+- [ ] KnowledgeReadTool 按 ID 返回完整笔记
+- [ ] KnowledgeStoreTool 写入并返回 ID 和 tags
+- [ ] NeonAgent 注入 KB 到 WebSearchTool 和 WebFetchTool
+- [ ] SubAgent 也共享同一 KB（构造参数传入）
+- [ ] `/kb` 命令族 6 个子命令全部工作
+- [ ] `/tokens` 显示详细面板（总计/按模型分组/最近 5 次）
+- [ ] 每次回复后显示紧凑 token 行
+
+---
+
 ## 🎓 进阶扩展（可选，学完上面再做）
 - [ ] 支持 Linux/macOS（写 .sh 启动脚本，对应打包工具）
 - [ ] 技能(Skills)插件系统 - 动态加载第三方工具包
-- [ ] 向量语义检索记忆 - 用embedding模型提升记忆召回准确率（需要ollama）
-- [ ] Token 计数与用量统计
-- [x] 更多工具：Git 操作、HTTP请求调试（已实现 GitTool / HttpTool / TimeTool / MathTool / ComputerUseTool）
+- [ ] 向量语义检索 - 用 embedding 模型替代 KB 的 TF 打分，提升召回准确率（v1.4.0 已实现基础版关键词检索）
+- [x] Token 计数与用量统计（v1.4.0 已实现 TokenTracker + `/tokens` 命令 + 每次回复后紧凑行）
+- [x] 更多工具：Git 操作、HTTP请求调试（已实现 GitTool / HttpTool / TimeTool / MathTool / ComputerUseTool / OfficeTool）
+- [x] RAG 知识库 - 网络搜索结果自动归纳为 Obsidian 笔记，TF 打分检索（v1.4.0 已实现基础版）
 - [ ] 多会话切换UI
 - [ ] 主题切换（除了霓虹青绿，支持其他配色）
 - [ ] 对话导出为Markdown
@@ -1305,6 +1595,7 @@ def ask(self, task_desc, uncertainty_reason):
 - [ ] Subagent 并发度限制和优先级队列
 - [ ] 思维树多轮迭代 - PlanToTTool 支持多轮自反思优化（当前是单次调用）
 - [x] 综合认知框架 - 集成 Plan-and-Execute + Self-Reflection + Thinking/ToT + Self-Ask 四框架（v1.2.0 已实现）
+- [x] 上下文压缩 - token 超 max_context_tokens * 2/3 时 LLM 摘要压缩早期对话，取消硬轮数限制（v1.3.0 已实现）
 - [ ] 待办优先级和截止时间 - TodoList 加 priority / due_date 字段
 - [ ] AI 主动汇报进度 - 长任务执行中定期用 todo list 输出当前进度
 - [ ] ask_user 多渠道接入 - 微信/QQ 远程用户也能回答 AI 提问（当前只支持本地终端）
@@ -1344,6 +1635,12 @@ def ask(self, task_desc, uncertainty_reason):
 | [OpenAI Computer Use Guide](https://platform.openai.com/docs/guides/computer-use) | Codex computer use 设计理念与最佳实践（阶段十二对标参考） |
 | [PyInstaller Hidden Imports](https://pyinstaller.org/en/stable/usage.html) | frozen 模式下可选依赖打包配置（阶段十二跨环境运行） |
 | [OpenAI Reasoning Models Guide](https://platform.openai.com/docs/guides/reasoning) | reasoning_effort 参数标准（low/medium/high，阶段十二 v1.1.1） |
+| [RAG 论文 - Retrieval-Augmented Generation](https://arxiv.org/abs/2005.11401) | 检索增强生成原理（阶段十三 KB 参考） |
+| [OpenAI Stream API - stream_options](https://platform.openai.com/docs/api-reference/chat/create) | 流式响应 usage 字段提取标准（阶段十三 Token 跟踪） |
+| [Obsidian 官方文档](https://help.obsidian.md/) | Markdown 笔记 + frontmatter + 标签 + 双链（阶段十三 vault 参考） |
+| [YAML frontmatter 规范](https://jekyllrb.com/docs/front-matter/) | 笔记元数据格式标准（阶段十三 KB 笔记结构） |
+| [TF-IDF 算法](https://en.wikipedia.org/wiki/Tf%E2%80%93idf) | 词频-逆文档频率打分原理（阶段十三 KB 检索简化版参考） |
+| [jieba 中文分词](https://github.com/fxsjy/jieba) | 中文分词库（阶段十三简化为 2-gram，进阶可用 jieba） |
 
 ---
 
@@ -1365,10 +1662,14 @@ def ask(self, task_desc, uncertainty_reason):
 15. **工程改进是迭代必修课** - 阶段十二的 v1.1.0 工程改进都是真实使用中暴露的问题：串行 vs 并行、模块级 import 检测、参数名冲突、Windows start 命令解析等。建议按"工程改进"表格逐项对照实现，每改完一步跑 `python -m pytest tests/ -q --tb=short` 确认无回归。这些坑都很典型，遇到报错时先看错误信息（`NameError` / `got multiple values for argument` / `list index out of range`）就能定位到对应改进点
 16. **GUI 自动化优先用"截屏+点击"而非 shell** - ComputerUseTool 默认走 `screenshot → click/type → screenshot 验证 → 循环` 的工作流，而不是用大量 shell 命令。原因：(1) shell 启动应用难定位窗口位置；(2) 点击坐标可跨应用复用；(3) vision LLM 返回结构化坐标清单可直接喂给下一步。理解这个工作流后，可应用到 RPA、自动化测试、远程协助等场景
 17. **codex 自主执行的边界** - `_confirm` 直接返回 True 让 AI 自主循环不卡顿，但这也意味着 AI 可能误删文件、误点按钮。生产环境建议加白名单（仅允许 click/type，禁止 drag/key 系统组合键）+ 关键操作二次确认（如删除文件、发送消息）。本项目的安全键白名单 `_SAFE_KEYS` 是基础防护，可在此基础上扩展
-18. **reasoning_effort 是推理模型开关** - OpenAI o-series / DeepSeek-R1 / GLM-4.5 / Qwen3-Thinking 等推理模型支持 reasoning_effort 参数（low/medium/high）控制思考深度。本项目用 None 作默认值（不传该字段到 payload），切换到 low/medium/high 时才注入。注意：非推理模型设置后会报 400，由 LLMError 链捕获。建议先用一个推理模型测试（如 deepseek-reasoner），理解 payload 行为后再应用到生产
-19. **v1.2.0 认知框架是 Agent 升级关键** - 单一 ReAct 循环只能"走一步看一步"，复杂任务容易陷入局部最优。CognitiveController 状态机让 Agent 学会"先规划再执行→执行后反思→失败重规划→不确定提问"。建议按 4 阶段顺序实现（Plan-Execute → Self-Reflection → ToT → Self-Ask），每阶段完成后跑全套测试确认无回归。关键设计点：(1) LLM 分类触发避免简单任务过度规划；(2) ToT 内嵌 Planner 不破坏对外接口；(3) 分级降级带 feedback 避免重复失败；(4) SelfAsker 失败不阻断主循环
-20. **状态机比 if-else 链更适合复杂流程** - CognitiveController 用 State 枚举 + while 循环调度，比 if-else 链更清晰、更易扩展（加新状态只需加 enum 值 + 分支）。建议理解透状态机模式后，应用到其他需要多阶段处理的场景（如 IM Bot 消息处理流水线、长任务进度追踪等）
-21. **TDD 在多框架集成中尤其重要** - v1.2.0 集成 4 个认知框架，每个框架都有 stub → 真实实现 的升级过程。先写测试（RED）→ 实现最小代码（GREEN）→ 重构（REFACTOR）的节奏，能确保每一步行为可验证、回归可捕捉。建议严格按 plan 文档的 Task 顺序执行，每个 Task 完成后 commit 一次
+18. **阶段十三是知识沉淀关键** - RAG 让 Agent 从"一次性使用"升级为"持续学习"。建议先用最简单的字符估算（`len // 4`）跑通整个 KB 流程（归纳+存储+检索），再接 LLM 归纳提升质量。Obsidian vault 配置非必需，但配置后能图形化浏览笔记，开发调试时非常直观
+19. **非阻塞钩子是工具扩展通用模式** - KB 钩子的 try/except 吞掉异常、失败不影响主流程，这种模式可推广到其他场景：例如工具执行后自动记录到长期记忆、工具失败时自动通知用户。关键是把"副作用"和"主流程"解耦，副作用失败不能拖垮主流程
+20. **中文 2-gram 是性价比最高的分词** - 不引入 jieba 等外部依赖，纯字符切分 + 2-gram 保留字符对语义，对短查询（"LangChain 教程"、"知识库"）召回效果已经够用。进阶可换 jieba 提升精度，但初期不必过度工程化
+21. **Token 可视化是成本控制第一步** - 实时看到每次回复的 token 消耗，能直观发现哪些任务特别烧钱（如 ReAct 多轮迭代、认知框架 ToT 多候选）。建议先跑通字符估算模式（所有供应商都支持），再启用 `stream_options.include_usage` 提取精确 usage
+22. **reasoning_effort 是推理模型开关** - OpenAI o-series / DeepSeek-R1 / GLM-4.5 / Qwen3-Thinking 等推理模型支持 reasoning_effort 参数（low/medium/high）控制思考深度。本项目用 None 作默认值（不传该字段到 payload），切换到 low/medium/high 时才注入。注意：非推理模型设置后会报 400，由 LLMError 链捕获。建议先用一个推理模型测试（如 deepseek-reasoner），理解 payload 行为后再应用到生产
+23. **v1.2.0 认知框架是 Agent 升级关键** - 单一 ReAct 循环只能"走一步看一步"，复杂任务容易陷入局部最优。CognitiveController 状态机让 Agent 学会"先规划再执行→执行后反思→失败重规划→不确定提问"。建议按 4 阶段顺序实现（Plan-Execute → Self-Reflection → ToT → Self-Ask），每阶段完成后跑全套测试确认无回归。关键设计点：(1) LLM 分类触发避免简单任务过度规划；(2) ToT 内嵌 Planner 不破坏对外接口；(3) 分级降级带 feedback 避免重复失败；(4) SelfAsker 失败不阻断主循环
+24. **状态机比 if-else 链更适合复杂流程** - CognitiveController 用 State 枚举 + while 循环调度，比 if-else 链更清晰、更易扩展（加新状态只需加 enum 值 + 分支）。建议理解透状态机模式后，应用到其他需要多阶段处理的场景（如 IM Bot 消息处理流水线、长任务进度追踪等）
+25. **TDD 在多框架集成中尤其重要** - v1.2.0 集成 4 个认知框架，每个框架都有 stub → 真实实现 的升级过程。先写测试（RED）→ 实现最小代码（GREEN）→ 重构（REFACTOR）的节奏，能确保每一步行为可验证、回归可捕捉。建议严格按 plan 文档的 Task 顺序执行，每个 Task 完成后 commit 一次
 
 ---
 
