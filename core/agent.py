@@ -18,6 +18,9 @@ from tools.math_tool import MathTool
 from tools.http_tool import HttpTool
 from tools.git_tool import GitTool
 from tools.computer_use import ComputerUseTool
+from tools.office import WordTool, PdfTool, ExcelTool, PptTool
+from tools.kb_tool import KnowledgeSearchTool, KnowledgeReadTool, KnowledgeStoreTool
+from core.knowledge_base import KnowledgeBase
 from core.todo import TodoList
 from ui.console import (
     print_thinking_spinner,
@@ -33,8 +36,30 @@ class NeonAgent:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.llm = LLMClient(config)
+        # Token 消耗跟踪器：LLMClient 每次调用后自动记录 usage
+        from core.token_tracker import TokenTracker
+        self.token_tracker = TokenTracker()
+        self.llm.token_tracker = self.token_tracker
+        mem_config = config.get('memory', {})
+        # 自动压缩阈值基于 LLM max_tokens * 2/3（若 memory 未显式配置 max_context_tokens）
+        llm_max_tokens = config.get('llm', {}).get('max_tokens', 4096)
+        max_ctx = mem_config.get('max_context_tokens') or llm_max_tokens
         self.memory = ConversationMemory(
-            max_history=config['memory']['max_history']
+            max_history=mem_config.get('max_history', 50),
+            max_context_tokens=max_ctx,
+            keep_recent_turns=mem_config.get('keep_recent_turns', 6),
+        )
+        # 注入 LLM 客户端用于上下文压缩（超阈值时生成摘要）
+        self.memory.set_llm_client(self.llm)
+        # 初始化知识库（RAG）：网络搜索结果自动归纳存入 Obsidian vault
+        kb_config = config.get('knowledge_base', {})
+        kb_vault = kb_config.get('vault_path')
+        self.knowledge_base = KnowledgeBase(
+            vault_path=kb_vault if kb_vault else None,
+            llm_client=self.llm,
+            auto_store=kb_config.get('auto_store', True),
+            max_note_length=kb_config.get('max_note_length', 4000),
+            enabled=kb_config.get('enabled', True),
         )
         self.long_term_memory = LongTermMemory()
         self.todo_list = TodoList()
@@ -81,10 +106,16 @@ class NeonAgent:
         self.registry.register(FileWriteTool())
         self.registry.register(FileEditTool())
         self.registry.register(PythonExecTool())
-        self.registry.register(WebSearchTool())
-        self.registry.register(WebFetchTool())
+        web_search = WebSearchTool()
+        web_fetch = WebFetchTool()
+        # 注入知识库引用：搜索/抓取成功后自动归纳入库
+        web_search.knowledge_base = self.knowledge_base
+        web_fetch.knowledge_base = self.knowledge_base
+        self.registry.register(web_search)
+        self.registry.register(web_fetch)
         # 主 agent 的 subagent 工具，depth=2（可再递归 2 层）
-        self.registry.register(SubAgentTool(self.llm, self.long_term_memory, depth=2))
+        self.registry.register(SubAgentTool(self.llm, self.long_term_memory, depth=2,
+                                            knowledge_base=self.knowledge_base))
         # 行动前向用户提问以明确意图
         self.registry.register(AskUserTool())
         # 思维树规划：思考 → 评估 → 筛选循环后再行动
@@ -101,6 +132,15 @@ class NeonAgent:
         self.registry.register(GitTool())
         # 桌面控制（模仿 Codex computer use）：截屏 + 鼠标键盘 + vision 分析
         self.registry.register(ComputerUseTool(llm_client=self.llm))
+        # Office 文档读写：Word/PDF/Excel/PPT
+        self.registry.register(WordTool())
+        self.registry.register(PdfTool())
+        self.registry.register(ExcelTool())
+        self.registry.register(PptTool())
+        # 知识库（RAG）：检索/读取/写入归纳后的网络搜索知识
+        self.registry.register(KnowledgeSearchTool(self.knowledge_base))
+        self.registry.register(KnowledgeReadTool(self.knowledge_base))
+        self.registry.register(KnowledgeStoreTool(self.knowledge_base))
 
     def _build_system_prompt_with_memory(self, user_input: str) -> str:
         base_prompt = self.memory.system_prompt or ""
@@ -261,3 +301,5 @@ class NeonAgent:
     def clear_memory(self):
         self.memory.clear()
         self.memory.build_system_prompt(self.registry.get_all_schemas())
+        # 重置 token 跟踪器（新会话从零开始计数）
+        self.token_tracker.reset()

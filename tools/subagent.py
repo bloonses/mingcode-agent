@@ -24,13 +24,15 @@ class SubAgentTool(BaseTool):
         "required": ["task"]
     }
 
-    def __init__(self, llm: LLMClient, long_term_memory: LongTermMemory, depth: int = 2):
+    def __init__(self, llm: LLMClient, long_term_memory: LongTermMemory, depth: int = 2,
+                 knowledge_base=None):
         self._llm = llm
         self._ltm = long_term_memory
         self._depth = depth
+        self._kb = knowledge_base
 
     def execute(self, task: str, context: str = "") -> str:
         # 延迟导入避免循环依赖
         from core.subagent import SubAgent
-        sub = SubAgent(self._llm, self._ltm, depth=self._depth)
+        sub = SubAgent(self._llm, self._ltm, depth=self._depth, knowledge_base=self._kb)
         return sub.run(task, context)

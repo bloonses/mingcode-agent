@@ -14,6 +14,7 @@ from tools.shell import ShellTool
 from tools.files import FileReadTool, FileWriteTool, FileEditTool
 from tools.code import PythonExecTool
 from tools.search import WebSearchTool, WebFetchTool
+from tools.office import WordTool, PdfTool, ExcelTool, PptTool
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +45,16 @@ class SubAgent:
     """子智能体：独立上下文跑完任务，返回最终答案字符串。"""
 
     def __init__(self, llm: LLMClient, long_term_memory: LongTermMemory,
-                 depth: int = 2, timeout: int = DEFAULT_TIMEOUT):
+                 depth: int = 2, timeout: int = DEFAULT_TIMEOUT,
+                 knowledge_base=None):
         self.llm = llm
         self.long_term_memory = long_term_memory
+        self.knowledge_base = knowledge_base
         self.depth = depth
         self.timeout = timeout
-        self.memory = ConversationMemory(max_history=30)
+        self.memory = ConversationMemory(max_history=30, max_context_tokens=4000, keep_recent_turns=4)
+        # subagent 也注入 LLM 用于上下文压缩
+        self.memory.set_llm_client(llm)
         self.registry = ToolRegistry()
         self._register_tools()
         self.memory.build_system_prompt(self.registry.get_all_schemas())
@@ -62,8 +67,19 @@ class SubAgent:
         self.registry.register(FileWriteTool())
         self.registry.register(FileEditTool())
         self.registry.register(PythonExecTool())
-        self.registry.register(WebSearchTool())
-        self.registry.register(WebFetchTool())
+        web_search = WebSearchTool()
+        web_fetch = WebFetchTool()
+        # 子智能体的搜索结果也归纳入主 Agent 共享的知识库（若已注入）
+        if self.knowledge_base is not None:
+            web_search.knowledge_base = self.knowledge_base
+            web_fetch.knowledge_base = self.knowledge_base
+        self.registry.register(web_search)
+        self.registry.register(web_fetch)
+        # Office 文档读写：Word/PDF/Excel/PPT
+        self.registry.register(WordTool())
+        self.registry.register(PdfTool())
+        self.registry.register(ExcelTool())
+        self.registry.register(PptTool())
         # depth > 0 时注册递归 subagent 工具
         if self.depth > 0:
             from tools.subagent import SubAgentTool

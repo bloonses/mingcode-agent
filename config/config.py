@@ -57,7 +57,9 @@ DEFAULT_CONFIG = {
         }
     },
     "memory": {
-        "max_history": 50
+        "max_history": 50,
+        "max_context_tokens": 6000,
+        "keep_recent_turns": 6
     },
     "wechat": {
         "enabled": False,
@@ -79,6 +81,12 @@ DEFAULT_CONFIG = {
         "max_replans": 3,
         "max_task_retries": 2,
         "self_ask": False
+    },
+    "knowledge_base": {
+        "enabled": True,
+        "vault_path": None,
+        "auto_store": True,
+        "max_note_length": 4000
     }
 }
 
@@ -128,9 +136,24 @@ tools:
 
 # 记忆配置
 memory:
-  # 最大保留对话轮数（每轮=用户提问+AI回复）
-  # 超过后自动丢弃最早的对话，避免token超限
+  # 最大保留对话轮数（向后兼容字段，不再用于硬截断）
   max_history: 50
+  # 上下文 token 上限（默认从 llm.max_tokens 继承；自动压缩阈值 = 此值 * 2/3）
+  # 留空则使用 llm.max_tokens；显式设置则覆盖
+  max_context_tokens: null
+  # 压缩时保留最近 K 轮原始对话（每轮 = user + assistant = 2 条消息）
+  keep_recent_turns: 6
+
+# 知识库（RAG）配置：网络搜索结果自动归纳存储到 Obsidian vault
+knowledge_base:
+  # 是否启用（关闭后搜索结果不会自动入库）
+  enabled: true
+  # Obsidian vault 目录路径（留空则使用用户数据目录下的 vault/）
+  vault_path: null
+  # 是否在网络搜索后自动存储归纳结果
+  auto_store: true
+  # 单条笔记最大字符数（超出截断）
+  max_note_length: 4000
 """
 
 

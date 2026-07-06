@@ -14,7 +14,7 @@ class StreamResponse:
     def __init__(self, generator):
         self._generator = generator
         self.final_message = None
-    
+
     def __iter__(self):
         self.final_message = yield from self._generator
 
@@ -31,6 +31,23 @@ class LLMClient:
         # 推理模型思考深度（None / "low" / "medium" / "high"）
         raw_effort = llm_config.get("reasoning_effort")
         self.reasoning_effort = raw_effort if raw_effort in ("low", "medium", "high") else None
+        # Token 消耗跟踪器（由 NeonAgent 注入）
+        self.token_tracker = None
+
+    def _record_usage(self, usage: Optional[Dict[str, Any]], prompt_text: str = "", completion_text: str = "") -> None:
+        """把 API 返回的 usage 记录到 tracker；缺失时用估算兜底。"""
+        if self.token_tracker is None:
+            return
+        if usage and isinstance(usage, dict) and usage.get("total_tokens") is not None:
+            self.token_tracker.record(
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens"),
+                model=self.model,
+            )
+        else:
+            # API 未返回 usage，用字符数估算兜底
+            self.token_tracker.record_estimated(prompt_text, completion_text, self.model)
     
     @property
     def headers(self):
@@ -108,6 +125,9 @@ class LLMClient:
             "max_tokens": self.max_tokens,
             "stream": stream
         }
+        if stream:
+            # 请求流式响应中包含 usage（OpenAI 标准，部分供应商支持）
+            payload["stream_options"] = {"include_usage": True}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -188,7 +208,7 @@ class LLMClient:
         if not stream:
             return self._handle_non_stream(response)
         else:
-            return StreamResponse(self._handle_stream(response))
+            return StreamResponse(self._handle_stream(response, messages))
 
     def _handle_non_stream(self, response: requests.Response) -> Dict[str, Any]:
         data = response.json()
@@ -204,13 +224,17 @@ class LLMClient:
         }
         if message.get("tool_calls"):
             result["tool_calls"] = self._parse_tool_calls(message["tool_calls"])
+        # 提取 usage 并记录 token 消耗
+        usage = data.get("usage")
+        self._record_usage(usage, completion_text=result.get("content") or "")
         return result
 
-    def _handle_stream(self, response: requests.Response) -> Generator[str, None, Dict[str, Any]]:
+    def _handle_stream(self, response: requests.Response, messages: List[Dict[str, Any]] = None) -> Generator[str, None, Dict[str, Any]]:
         full_content = ""
         full_tool_calls = {}
         tool_call_indices = set()
-        
+        stream_usage = None
+
         for line in response.iter_lines():
             if not line:
                 continue
@@ -221,14 +245,17 @@ class LLMClient:
                     break
                 try:
                     data = json.loads(data_str)
+                    # 流式 usage 通常在最后一个 chunk（choices 为空但 usage 存在）
+                    if data.get("usage"):
+                        stream_usage = data["usage"]
                     choice = (data.get("choices") or [{}])[0]
                     delta = choice.get("delta", {})
-                    
+
                     if delta.get("content"):
                         content_piece = delta["content"]
                         full_content += content_piece
                         yield content_piece
-                    
+
                     if delta.get("tool_calls"):
                         for tc_delta in delta["tool_calls"]:
                             idx = tc_delta.get("index", 0)
@@ -251,7 +278,7 @@ class LLMClient:
                                     full_tool_calls[idx]["function"]["arguments"] += func_delta["arguments"]
                 except json.JSONDecodeError:
                     continue
-        
+
         result = {
             "role": "assistant",
             "content": full_content if full_content else None,
@@ -260,4 +287,13 @@ class LLMClient:
         if tool_call_indices:
             raw_tool_calls = [full_tool_calls[i] for i in sorted(tool_call_indices)]
             result["tool_calls"] = self._parse_tool_calls(raw_tool_calls)
+        # 记录流式调用的 token 消耗（messages 用于 usage 缺失时的 prompt 估算）
+        prompt_text = ""
+        if messages:
+            prompt_text = " ".join(
+                str(m.get("content") or "")
+                for m in messages
+                if isinstance(m.get("content"), str)
+            )
+        self._record_usage(stream_usage, prompt_text=prompt_text, completion_text=full_content)
         return result

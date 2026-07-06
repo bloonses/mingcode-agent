@@ -8,30 +8,81 @@ from config.config import get_user_data_dir
 
 
 class ConversationMemory:
-    def __init__(self, max_history: int = 50, system_prompt: Optional[str] = None):
-        self.max_history = max_history
+    """对话记忆，基于 token 阈值的上下文压缩。
+
+    取消了对话轮数硬限制（_trim_history），改为：
+    - 自动压缩阈值 = max_context_tokens * 2 // 3
+    - 当 token 估算超过阈值时，把早期对话用 LLM 摘要成一条 system 消息
+    - 保留最近 keep_recent_turns 轮（每轮 = user + assistant = 2 条）原始对话
+    - 用户可通过 compress_now() 手动强制触发压缩
+    - 无 LLM 客户端时退化为截断早期消息（保留最近）
+    - max_history 字段保留向后兼容（已保存会话文件仍可加载），不再用于硬截断
+    """
+
+    # 摘要消息的特殊标记字段
+    SUMMARY_FLAG = "compressed_summary"
+    # 自动压缩触发比例（最大上下文的 2/3）
+    COMPRESS_RATIO_NUMERATOR = 2
+    COMPRESS_RATIO_DENOMINATOR = 3
+
+    def __init__(
+        self,
+        max_history: int = 50,
+        system_prompt: Optional[str] = None,
+        max_context_tokens: int = 6000,
+        keep_recent_turns: int = 6,
+    ):
+        self.max_history = max_history  # 向后兼容字段，不再用于硬截断
+        self.max_context_tokens = max_context_tokens
+        self.keep_recent_turns = max(1, keep_recent_turns)
         self.system_prompt = system_prompt
         self.messages: List[Dict[str, Any]] = []
+        self._llm_client: Optional[Any] = None
         self.conversations_dir = get_user_data_dir() / "conversations"
         self.conversations_dir.mkdir(parents=True, exist_ok=True)
         self.current_session_name: Optional[str] = None
 
+    def set_llm_client(self, llm_client: Any) -> None:
+        """注入 LLM 客户端，用于上下文压缩时生成摘要。"""
+        self._llm_client = llm_client
+
+    def set_max_context_tokens(self, max_context_tokens: int) -> None:
+        """动态更新最大上下文 token 阈值（通常从 LLM max_tokens 同步）。"""
+        self.max_context_tokens = max(1, max_context_tokens)
+
+    def get_compress_threshold(self) -> int:
+        """返回自动压缩触发阈值 = max_context_tokens * 2 / 3。"""
+        return self.max_context_tokens * self.COMPRESS_RATIO_NUMERATOR // self.COMPRESS_RATIO_DENOMINATOR
+
+    def compression_status(self) -> Dict[str, Any]:
+        """返回当前压缩状态（供 UI 显示 token 使用情况）。"""
+        current = self.estimate_tokens()
+        threshold = self.get_compress_threshold()
+        return {
+            "current_tokens": current,
+            "threshold": threshold,
+            "max_context_tokens": self.max_context_tokens,
+            "is_over_threshold": current > threshold,
+            "message_count": len(self.messages),
+            "has_summary": any(m.get(self.SUMMARY_FLAG) for m in self.messages),
+        }
+
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         if role not in ("user", "assistant", "system", "tool"):
             raise ValueError(f"Unsupported role: {role}")
-        
+
         message: Dict[str, Any] = {"role": role, "content": content}
-        
+
         if role == "tool":
             if "tool_call_id" not in kwargs:
                 raise ValueError("tool message requires tool_call_id parameter")
             message["tool_call_id"] = kwargs["tool_call_id"]
-        
+
         if role == "assistant" and "tool_calls" in kwargs:
             message["tool_calls"] = kwargs["tool_calls"]
-        
+
         self.messages.append(message)
-        self._trim_history()
+        self._maybe_compress()
 
     def get_messages(self) -> List[Dict[str, Any]]:
         result = []
@@ -44,19 +95,98 @@ class ConversationMemory:
         self.messages = []
         self.current_session_name = None
 
-    def _trim_history(self) -> None:
-        non_system = [m for m in self.messages if m["role"] != "system"]
-        max_messages = self.max_history * 2
-        if len(non_system) > max_messages:
-            remove_count = len(non_system) - max_messages
-            removed = 0
-            new_messages = []
-            for msg in self.messages:
-                if msg["role"] != "system" and removed < remove_count:
-                    removed += 1
-                else:
-                    new_messages.append(msg)
-            self.messages = new_messages
+    def _maybe_compress(self) -> None:
+        """token 超过 max_context_tokens * 2/3 时自动触发压缩。"""
+        threshold = self.get_compress_threshold()
+        if self.estimate_tokens() <= threshold:
+            return
+
+        keep_count = self.keep_recent_turns * 2  # 每轮 = user + assistant
+        # 仅当超出保留窗口时才压缩
+        non_summary_msgs = [m for m in self.messages if not m.get(self.SUMMARY_FLAG)]
+        if len(non_summary_msgs) <= keep_count:
+            return  # 没有早期对话可压缩
+
+        self._compress_history(keep_count)
+
+    def compress_now(self) -> bool:
+        """手动强制触发压缩，忽略阈值检查。
+
+        Returns:
+            True 表示已执行压缩；False 表示消息数不足以压缩。
+        """
+        keep_count = self.keep_recent_turns * 2
+        non_summary_msgs = [m for m in self.messages if not m.get(self.SUMMARY_FLAG)]
+        if len(non_summary_msgs) <= keep_count:
+            return False  # 没有早期对话可压缩
+        self._compress_history(keep_count)
+        return True
+
+    def _compress_history(self, keep_count: int) -> None:
+        """把早期对话压缩成一条摘要消息，保留最近 keep_count 条。"""
+        # 找到现有摘要（如果有）
+        old_summary_content = None
+        for m in self.messages:
+            if m.get(self.SUMMARY_FLAG):
+                old_summary_content = m["content"]
+                break
+
+        # 分离：[old_summary] + [early_messages] + [recent_messages]
+        recent = self.messages[-keep_count:]
+        early_with_old_summary = self.messages[:-keep_count]
+
+        # 提取早期对话内容（排除旧摘要消息本身）
+        early_to_compress = [m for m in early_with_old_summary if not m.get(self.SUMMARY_FLAG)]
+        if not early_to_compress:
+            return
+
+        # 构造压缩输入：旧摘要（如果有）+ 早期对话
+        summary_text = self._generate_summary(old_summary_content, early_to_compress)
+
+        # 组装新消息列表：[新摘要] + recent
+        new_summary_msg = {
+            "role": "system",
+            "content": summary_text,
+            self.SUMMARY_FLAG: True,
+        }
+        self.messages = [new_summary_msg] + recent
+
+    def _generate_summary(self, old_summary: Optional[str], messages: List[Dict[str, Any]]) -> str:
+        """调用 LLM 生成摘要。无 LLM 时返回截断标记。"""
+        if self._llm_client is None:
+            # 无 LLM 兜底：直接截断，不生成摘要（保留最近即可）
+            return "【早期对话已截断（未配置 LLM 客户端，无法生成摘要）】"
+
+        # 构造待压缩文本
+        parts = []
+        if old_summary:
+            parts.append(f"【之前对话摘要】\n{old_summary}")
+        parts.append("【需要压缩的对话】")
+        for m in messages:
+            role = m["role"]
+            content = (m.get("content") or "")[:500]  # 截断长内容避免输入过大
+            parts.append(f"[{role}] {content}")
+        conversation_text = "\n".join(parts)
+
+        prompt = (
+            "请把以下对话历史压缩成一份简洁的摘要，保留关键信息（用户意图、已做的决定、"
+            "已完成的任务、重要的代码改动、未解决的问题）。摘要应不超过 300 字，使用中文。\n\n"
+            f"{conversation_text}\n\n"
+            "摘要："
+        )
+
+        try:
+            response = self._llm_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                stream=False,
+            )
+            content = (response.get("content") or "").strip()
+            if content:
+                return f"【早期对话摘要】\n{content}"
+            return "【早期对话已压缩（摘要为空）】"
+        except Exception as e:
+            # LLM 调用失败时退化为截断标记，不抛异常
+            return f"【早期对话已截断（LLM 摘要失败: {str(e)[:80]}）】"
 
     def estimate_tokens(self) -> int:
         total = 0
@@ -87,32 +217,37 @@ class ConversationMemory:
             else:
                 filename = f"{self._generate_session_name()}.json"
                 self.current_session_name = filename[:-5]
-        
+
         save_data = {
             "saved_at": datetime.now().isoformat(),
             "max_history": self.max_history,
+            "max_context_tokens": self.max_context_tokens,
+            "keep_recent_turns": self.keep_recent_turns,
             "messages": self.messages
         }
-        
+
         filepath = self.conversations_dir / filename
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
-        
+
         self.current_session_name = filename[:-5]
         return filename[:-5]
 
     def load(self, name: str) -> bool:
         filename = f"{name}.json" if not name.endswith(".json") else name
         filepath = self.conversations_dir / filename
-        
+
         if not filepath.exists():
             return False
-        
+
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
-        
+
         self.messages = data.get("messages", [])
         self.max_history = data.get("max_history", self.max_history)
+        # 旧会话文件可能没有这两个字段，用默认值
+        self.max_context_tokens = data.get("max_context_tokens", self.max_context_tokens)
+        self.keep_recent_turns = data.get("keep_recent_turns", self.keep_recent_turns)
         self.current_session_name = filename[:-5]
         return True
 
